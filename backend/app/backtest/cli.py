@@ -54,7 +54,7 @@ def fmt(m: dict) -> str:
 
 
 async def main() -> None:
-    ap = argparse.ArgumentParser(description="AI KRİPTO TRADER backtest")
+    ap = argparse.ArgumentParser(description="AI KRİPTO YÖNETİCİSİ backtest")
     ap.add_argument("symbol", help="örn. BTCUSDT")
     ap.add_argument("--days", type=int, default=120, help="test edilecek gün sayısı (4sa EMA200 için ek ısınma verisi otomatik eklenir)")
     ap.add_argument("--split", type=float, default=0.6, help="eğitim oranı (kalanı test)")

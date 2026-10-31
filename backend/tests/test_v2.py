@@ -205,3 +205,29 @@ async def test_telegram_message_is_sent_without_leaking_token(env):
     from app.logging_setup import redact
 
     assert "SECRETTOKEN" not in redact("hata https://api.telegram.org/bot123456:SECRETTOKEN-abcdefghij/sendMessage")
+
+
+async def test_regression_manage_mode_does_not_repeat_partial_sales(authed):
+    """Canlı döngüde bulunan hata: hedefte kısmi satış her 10 sn tekrarlanıp pozisyonu eritiyordu."""
+    env, api = authed, authed.api
+    await api.put("/api/settings", json={"values": {"portfolio_mode": "manage"}})
+    await api.post("/api/portfolio/holdings", json={"asset": "AAA", "quantity": 10, "avg_cost": 40.0})
+    s = await env.ctx.store.get()
+    from app.portfolio.manager import MarketView
+
+    mv = {"AAAUSDT": MarketView(score=50, sell_fit=70, trend="Yatay")}
+    env.ctx.feed.update("AAAUSDT", 48.0)
+    for _ in range(5):  # 5 değerlendirme turu (her tur ~10 sn)
+        await env.ctx.portfolio.evaluate_all({"AAAUSDT": 48.0}, mv, s)
+    h = next(x for x in (await api.get("/api/portfolio")).json()["items"] if x["asset"] == "AAA")
+    assert h["quantity"] == pytest.approx(5.0)  # yalnızca BİR kez %50 satıldı
+    assert h["trailing_active"] is True
+    acts = (await api.get("/api/portfolio")).json()["actions"]
+    assert sum(1 for a in acts if a["action"] == "TAKE_PROFIT") == 1
+    assert "kısmi satış yapıldı" in h["decision_text"]
+    # fiyat zirveden geri çekilince kalan miktar trailing stop ile (kârda) çıkar
+    await env.ctx.portfolio.evaluate_all({"AAAUSDT": 52.0}, mv, s)  # yeni zirve
+    await env.ctx.portfolio.evaluate_all({"AAAUSDT": 50.0}, mv, s)  # %3.8 geri çekilme > %1.5 mesafe
+    p = (await api.get("/api/portfolio")).json()
+    assert all(x["asset"] != "AAA" for x in p["items"])  # tamamen çıkıldı: listeden kalkar
+    assert p["actions"][0]["action"] == "TRAIL_EXIT" and p["actions"][0]["net_pnl"] > 0

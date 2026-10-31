@@ -5,6 +5,8 @@ import { Card, Confirm, Empty, ErrorBox, Loading, riskKind, ScorePill, Spark, St
 
 export default function Home() {
   const { data: d, error, reload } = usePoll(() => api.get("/dashboard"), 5000);
+  const daily = usePoll(() => api.get("/reports/daily"), 60000);
+  const pf = usePoll(() => api.get("/portfolio"), 15000);
   const [confirmEmergency, setConfirmEmergency] = useState(false);
   const [closeAll, setCloseAll] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -57,6 +59,13 @@ export default function Home() {
         <Stat label="Komisyon toplamı" value={`${usd(d.fees_total, 4)} USDT`} />
       </div>
 
+      {pf.data && pf.data.items.length > 0 && (
+        <Card title="Mevcut coinlerim" right={<a href="#/portfolio" className="link">Detay →</a>}>
+          <div className="between"><span>Portföy değeri</span><b>{usd(pf.data.totals.value)} USDT</b></div>
+          <div className="between"><span>Gerçekleşmemiş K/Z</span><b className={tone(pf.data.totals.unrealized_pnl)}>{signed(pf.data.totals.unrealized_pnl)} USDT</b></div>
+        </Card>
+      )}
+
       <Card title="En iyi fırsatlar" right={<a href="#/analyses" className="link">Tümü →</a>}>
         {d.top_opportunities.length === 0 ? (
           <Empty>Henüz analiz yok. İlk tarama tamamlanınca burada görünür.</Empty>
@@ -91,6 +100,10 @@ export default function Home() {
           </ul>
         )}
       </Card>
+
+      {daily.data && (
+        <Card title="Günlük işlem raporu"><p className="small" style={{ whiteSpace: "pre-wrap" }}>{daily.data.body}</p></Card>
+      )}
 
       <Card title="Son işlemler" right={<a href="#/history" className="link">Geçmiş →</a>}>
         {d.recent_trades.length === 0 ? (

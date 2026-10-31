@@ -21,6 +21,7 @@ class HoldingState:
     peak: float
     trailing_active: bool
     cost_known: bool = True
+    tp_done: bool = False
 
 
 @dataclass
@@ -88,7 +89,9 @@ def decide(h: HoldingState, price: float, mv: MarketView, s: TradingSettings) ->
             return d("REDUCE_RISK", 0.5, f"{why}: kâr varken (net %{net_pct:.1f}) pozisyonun yarısı satılarak risk azaltılıyor.")
         return d("HOLD", 0, f"Piyasa zayıf ve pozisyon zararda/başa başta (net %{net_pct:.1f}). Zararına otomatik satış yapılmıyor; dikkatle izleniyor.")
 
-    # 4) Hedef kâr
+    # 4) Hedef kâr (kısmi satış yalnızca BİR kez; kalan miktar trailing stop ile korunur)
+    if price >= target and net_pct > 0 and h.tp_done:
+        return d("HOLD", 0, f"Hedefte kısmi satış yapıldı; kalan miktar trailing stop ({trail_stop:.6g}) ile korunuyor, net kâr %{net_pct:.1f}." if trail_stop else f"Hedefte kısmi satış yapıldı; kalan miktar izleniyor (net %{net_pct:.1f}).")
     if price >= target and net_pct > 0:
         if mv.score is not None and mv.score >= 70 and (mv.sell_fit or 0) < 40:
             return d("HOLD", 0, f"Hedefe ({target:.6g}) ulaşıldı ama trend hâlâ güçlü (puan {mv.score:.0f}); satış yerine trailing stop ile kâr korunarak devam ediliyor.")

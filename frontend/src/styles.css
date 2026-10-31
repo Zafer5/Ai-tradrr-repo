@@ -128,3 +128,16 @@ label { font-weight: 600; font-size: 13.5px; display: block; margin: 8px 0 4px; 
 .logo { width: 56px; height: 56px; border-radius: 16px; margin: 0 auto 4px; display: grid; place-items: center; background: linear-gradient(135deg, #5b8cff, #2fd18b); color: #fff; font-weight: 800; font-size: 22px; }
 @media (min-width: 760px) { .tabs { max-width: 760px; margin: 0 auto; left: 0; right: 0; border-radius: 16px 16px 0 0; border: 1px solid var(--line); } }
 @media (prefers-reduced-motion: no-preference) { .bar-f { transition: width .4s ease; } }
+.bell { position: relative; font-size: 20px; padding: 4px 6px; min-width: 44px; min-height: 44px; display: grid; place-items: center; }
+.bell b { position: absolute; top: 4px; right: 2px; min-width: 18px; height: 18px; border-radius: 9px; background: var(--neg); color: #fff; font-size: 11px; display: grid; place-items: center; padding: 0 4px; }
+.profiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.profile { border: 1px solid var(--line); background: var(--card2); color: var(--text); border-radius: 12px; padding: 10px 6px; font: inherit; cursor: pointer; min-height: 64px; }
+.profile.on { border-color: var(--brand); background: color-mix(in srgb, var(--brand) 16%, var(--card)); }
+.profile b { display: block; } .profile small { color: var(--muted); font-size: 11px; }
+.note { border-left: 3px solid var(--line); padding: 8px 10px; }
+.note.good { border-color: var(--pos); } .note.warn { border-color: var(--warn); } .note.bad { border-color: var(--neg); } .note.unread { background: color-mix(in srgb, var(--brand) 8%, var(--card)); }
+.note p { white-space: pre-wrap; font-size: 13.5px; margin-top: 4px; color: var(--muted); }
+.tagrow { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.tag { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--info) 14%, var(--card2)); color: var(--info); }
+.tag.hot { background: color-mix(in srgb, var(--warn) 18%, var(--card2)); color: var(--warn); }
+.meterline { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--muted); }

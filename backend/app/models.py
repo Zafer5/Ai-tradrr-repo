@@ -134,6 +134,7 @@ class Holding(Base):
     managed: Mapped[bool] = mapped_column(Boolean, default=True)  # False = işlem dışı bırak
     peak_price: Mapped[float] = mapped_column(Float, default=0.0)
     trailing_active: Mapped[bool] = mapped_column(Boolean, default=False)
+    tp_done: Mapped[bool] = mapped_column(Boolean, default=False)  # hedefte kısmi satış yapıldı (tekrarlanmaz)
     note: Mapped[str] = mapped_column(String(200), default="")
     last_decision: Mapped[str] = mapped_column(Text, default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

@@ -12,11 +12,14 @@ import Settings from "./pages/Settings";
 import Risk from "./pages/Risk";
 import Connections from "./pages/Connections";
 import Logs from "./pages/Logs";
+import Portfolio from "./pages/Portfolio";
+import Notifications from "./pages/Notifications";
 
 type Route = { id: string; label: string; icon: string; el: () => JSX.Element };
 
 export const ROUTES: Route[] = [
   { id: "home", label: "Ana Sayfa", icon: "🏠", el: Home },
+  { id: "portfolio", label: "Portföyüm", icon: "👛", el: Portfolio },
   { id: "scanner", label: "Coin Tarayıcı", icon: "📡", el: Scanner },
   { id: "analyses", label: "AI Analizleri", icon: "🧠", el: Analyses },
   { id: "positions", label: "Açık Pozisyonlar", icon: "💼", el: Positions },
@@ -25,9 +28,10 @@ export const ROUTES: Route[] = [
   { id: "settings", label: "Bot Ayarları", icon: "⚙️", el: Settings },
   { id: "risk", label: "Risk Yönetimi", icon: "🛡️", el: Risk },
   { id: "connections", label: "API Bağlantıları", icon: "🔌", el: Connections },
+  { id: "notifications", label: "Bildirimler", icon: "🔔", el: Notifications },
   { id: "logs", label: "Sistem Günlükleri", icon: "📜", el: Logs },
 ];
-const TABS = ["home", "scanner", "analyses", "positions"];
+const TABS = ["home", "portfolio", "scanner", "positions"];
 
 function currentRoute(): string {
   const h = location.hash.replace(/^#\/?/, "").split("?")[0];
@@ -55,7 +59,7 @@ function Login({ onDone }: { onDone: () => void }) {
     <main className="login">
       <form className="card login-card" onSubmit={submit}>
         <div className="logo">AI</div>
-        <h1>AI Kripto Trader</h1>
+        <h1>AI Kripto Yöneticisi</h1>
         <p className="muted">Panel şifrenizle giriş yapın.</p>
         <label htmlFor="pw">Şifre</label>
         <input id="pw" type="password" autoComplete="current-password" value={pw} onChange={(e) => setPw(e.target.value)} autoFocus />
@@ -76,9 +80,11 @@ function StatusStrip({ s }: { s: J }) {
       <div className="mode-banner">SANAL İŞLEM (PAPER) MODU — gerçek para kullanılmıyor</div>
       {b.emergency && <div className="alert bad" role="alert">🛑 ACİL DURDURMA AKTİF. Yeni alım yapılmaz. Risk Yönetimi sayfasından kaldırabilirsiniz.</div>}
       {b.safe_mode && <div className="alert warn" role="alert">⚠️ Güvenli mod: {b.safe_mode}. Yeni alım yapılmıyor.</div>}
+      {m.shock_active && <div className="alert bad" role="alert">📉 Ani düşüş koruması: {m.regime?.shock_reason ?? "BTC sert düştü"}. Yeni alımlar geçici olarak durduruldu.</div>}
       <div className="strip">
         <Badge kind={b.enabled ? "ok" : ""}>{b.enabled ? "Bot AÇIK" : "Bot KAPALI"}</Badge>
         <Badge kind={m.ws_connected ? "ok" : "warn"}>{m.ws_connected ? "Canlı akış" : "Akış yok"}</Badge>
+        {m.regime && <Badge kind={m.regime.direction === "Yükseliş" ? "ok" : m.regime.direction === "Düşüş" ? "bad" : ""}>BTC: {m.regime.direction}</Badge>}
         <span className="muted small">Son tarama: {ago(m.last_scan_age_sec)}</span>
       </div>
       {m.scan_error && <div className="alert warn">Piyasa verisi hatası: {m.scan_error}</div>}
@@ -125,6 +131,7 @@ export default function App() {
   }, []);
 
   const status = usePoll(() => api.get("/status"), 5000, [authed]);
+  const notes = usePoll(() => (authed ? api.get("/notifications?limit=1") : Promise.resolve({ unread: 0 })), 15000, [authed, route]);
 
   if (authed === null) return <div className="loading">Yükleniyor…</div>;
   if (!authed) return <Login onDone={() => setAuthed(true)} />;
@@ -134,8 +141,11 @@ export default function App() {
   return (
     <div className="app">
       <header className="top">
-        <strong>AI Kripto Trader</strong>
-        <span className="muted small">{R ? R.label : "Menü"}</span>
+        <strong>AI Kripto Yöneticisi</strong>
+        <span className="row">
+          <span className="muted small">{R ? R.label : "Menü"}</span>
+          <a href="#/notifications" className="bell" aria-label={`Bildirimler${notes.data?.unread ? `, ${notes.data.unread} okunmamış` : ""}`}>🔔{notes.data?.unread > 0 && <b>{notes.data.unread > 9 ? "9+" : notes.data.unread}</b>}</a>
+        </span>
       </header>
       <main className="content">
         <StatusStrip s={status.data} />
@@ -147,7 +157,7 @@ export default function App() {
           return (
             <a key={id} href={`#/${id}`} className={route === id ? "on" : ""} aria-current={route === id ? "page" : undefined}>
               <span aria-hidden>{r.icon}</span>
-              <small>{r.label.replace("Coin ", "").replace("Açık ", "")}</small>
+              <small>{r.label.replace("Coin ", "").replace("Açık ", "").replace("Portföyüm", "Portföy")}</small>
             </a>
           );
         })}

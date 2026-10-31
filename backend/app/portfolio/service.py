@@ -42,6 +42,7 @@ class PortfolioService:
                 ses.add(h)
             else:
                 h.quantity, h.avg_cost, h.cost_known, h.note = quantity, avg_cost, avg_cost > 0, note
+                h.tp_done = False  # kullanıcı pozisyonu güncelledi: yeniden değerlendirilir
                 h.updated_at = utcnow()
             await ses.commit()
         return h
@@ -115,7 +116,7 @@ class PortfolioService:
         value = h.quantity * px
         invested = h.quantity * h.avg_cost if h.cost_known else None
         unreal = (value * (1 - fee) * (1 - slip) - invested) if invested is not None and px else None
-        dec = decide(HoldingState(h.quantity, h.avg_cost, h.peak_price or px, h.trailing_active, h.cost_known), px, mv or MarketView(), s) if px else None
+        dec = decide(HoldingState(h.quantity, h.avg_cost, h.peak_price or px, h.trailing_active, h.cost_known, h.tp_done), px, mv or MarketView(), s) if px else None
         return {
             "asset": h.asset, "symbol": h.symbol, "quantity": h.quantity, "avg_cost": h.avg_cost if h.cost_known else None,
             "price": price, "value": value, "invested": invested, "unrealized_pnl": unreal,
@@ -138,7 +139,7 @@ class PortfolioService:
             if not h.managed or not px:
                 continue
             mv = views.get(h.symbol, MarketView())
-            dec = decide(HoldingState(h.quantity, h.avg_cost, h.peak_price or px, h.trailing_active, h.cost_known), px, mv, s)
+            dec = decide(HoldingState(h.quantity, h.avg_cost, h.peak_price or px, h.trailing_active, h.cost_known, h.tp_done), px, mv, s)
             async with self.db.session() as ses:
                 row = await ses.get(Holding, h.id)
                 row.peak_price, row.trailing_active = dec.peak, dec.trailing_active
@@ -147,7 +148,8 @@ class PortfolioService:
             if dec.action in ("HOLD", "NO_COST"):
                 continue
             key = (h.asset, dec.action)
-            if time.time() - self._last_action.get(key, 0) < 6 * 3600 and s.portfolio_mode == "watch":
+            # aynı öneri/işlem 6 saat içinde tekrarlanmaz (watch: spam önleme; manage: tekrarlayan kısmi satışları önleme)
+            if time.time() - self._last_action.get(key, 0) < 6 * 3600:
                 continue
             self._last_action[key] = time.time()
             events.append(await self._apply(h, px, dec, s))
@@ -163,6 +165,8 @@ class PortfolioService:
             if mode == "golge":
                 row = await ses.get(Holding, h.id)
                 row.quantity = max(0.0, row.quantity - qty)
+                if dec.action == "TAKE_PROFIT":
+                    row.tp_done, row.trailing_active = True, True  # kalan miktar trailing ile korunur
                 row.realized_pnl += net
                 row.fees_paid += qty * px * fee
                 if row.quantity <= 0:

@@ -14,6 +14,14 @@ function Detail({ a }: { a: J }) {
           <ul className="bullets warn">{Array.from(new Set(a.warnings as string[])).map((r, i) => <li key={i}>{r}</li>)}</ul>
         </>
       )}
+      <div className="kv">
+        <span>Alım uygunluğu</span><b>{usd(a.score, 0)}/100</b>
+        <span>Satış uygunluğu</span><b>{usd(a.sell_fit, 0)}/100</b>
+        <span>Düşüş riski</span><b>{usd(a.downside_risk, 0)}/100</b>
+        <span>Beklenen risk/getiri (brüt)</span><b>1 : {usd(a.expected_rr, 2)}</b>
+        <span>24s değişim</span><b>{a.change_pct === null ? "-" : pct(a.change_pct, 1, true)}</b>
+      </div>
+      {a.tags?.length > 0 && <div className="tagrow">{a.tags.map((t: string) => <span key={t} className={`tag ${t === "Aşırı yükselmiş" ? "hot" : ""}`}>{t}</span>)}</div>}
       <p><strong>Plan (öneri)</strong></p>
       <div className="kv">
         <span>Giriş</span><b>{price(a.entry)}</b>
@@ -62,7 +70,7 @@ export default function Analyses() {
                   <ScorePill score={a.eligible ? a.score : null} />
                   <div className="grow left">
                     <strong>{coin(a.symbol)}</strong> <span className="muted small">{a.eligible ? a.label : "Analiz dışı"}</span>
-                    <div className="small muted">{a.eligible ? <>{a.trend} · <Badge kind={riskKind(a.risk)}>Risk: {a.risk}</Badge></> : a.skip_reason}</div>
+                    <div className="small muted">{a.eligible ? <>{a.trend} · <Badge kind={riskKind(a.risk)}>Risk: {a.risk}</Badge>{a.held && <> · <Badge kind="warn">Portföyde</Badge></>}</> : a.skip_reason}</div>
                   </div>
                   <span className="muted">{open === a.symbol ? "▲" : "▼"}</span>
                 </button>

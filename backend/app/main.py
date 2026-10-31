@@ -1,4 +1,4 @@
-"""AI KRİPTO TRADER - FastAPI uygulaması.
+"""AI KRİPTO YÖNETİCİSİ - FastAPI uygulaması.
 
 Çalıştırma (backend klasöründen):  uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000
 """
@@ -74,7 +74,7 @@ def create_app(cfg: AppConfig | None = None, http: httpx.AsyncClient | None = No
         else:
             await bot.load_state()
             await service.ensure_account()
-        log.info("AI KRİPTO TRADER hazır. Mod: PAPER (sanal). Gerçek para: KİLİTLİ.")
+        log.info("AI KRİPTO YÖNETİCİSİ hazır. Mod: PAPER (sanal). Gerçek para: KİLİTLİ.")
         try:
             yield
         finally:
@@ -85,7 +85,7 @@ def create_app(cfg: AppConfig | None = None, http: httpx.AsyncClient | None = No
             await client.aclose()
             await db.dispose()
 
-    app = FastAPI(title="AI KRİPTO TRADER", version="0.1.0", lifespan=lifespan, docs_url="/api/docs", openapi_url="/api/openapi.json")
+    app = FastAPI(title="AI KRİPTO YÖNETİCİSİ", version="0.1.0", lifespan=lifespan, docs_url="/api/docs", openapi_url="/api/openapi.json")
     app.include_router(router)
     app.include_router(portfolio_router)
 
