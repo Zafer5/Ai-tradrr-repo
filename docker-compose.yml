@@ -1,0 +1,13 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      # Varsayılan: yalnızca sunucunun kendisi erişebilir. Telefondan erişim için README'deki yöntemlerden birini kullanın
+      # (Tailscale / Cloudflare Tunnel önerilir) veya .env içinde BIND_ADDR=0.0.0.0 yapın (yalnızca güvenli ağda!).
+      - "${BIND_ADDR:-127.0.0.1}:8000:8000"
+    volumes:
+      - trader-data:/data
+volumes:
+  trader-data:
