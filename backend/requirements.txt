@@ -1,0 +1,12 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+sqlalchemy[asyncio]>=2.0.30,<3
+aiosqlite>=0.20,<1
+asyncpg>=0.29,<1
+httpx>=0.27,<1
+websockets>=13,<16
+numpy>=1.26,<3
+pydantic>=2.7,<3
+pydantic-settings>=2.3,<3
+cryptography>=42
+PyJWT>=2.8,<3

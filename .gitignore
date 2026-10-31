@@ -1,0 +1,19 @@
+# Gizli dosyalar - ASLA Git'e yüklenmez
+.env
+.env.*
+!.env.example
+*.key
+data/
+*.db
+*.sqlite*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
+
+# Node
+node_modules/
+frontend/dist/
