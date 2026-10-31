@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from .config import settings
+from . import indicators as ind
 from .db import AnalysisRecord, Database, LogEntry, Position, Trade
 from .engine import Engine
 from .exchanges.binance import BinanceClient, BinancePriceStream
@@ -178,6 +179,46 @@ async def delete_keys():
     keystore().delete()
     await eng().log("INFO", "Kayıtlı API anahtarı silindi")
     return {"configured": False}
+
+
+def _nn(v):
+    return None if v is None or v != v else round(v, 10)
+
+
+@app.get("/api/chart/{symbol}", dependencies=[Depends(auth)])
+async def chart(symbol: str, interval: str = "15m", limit: int = 120):
+    import datetime as _dt
+    import re
+    e = eng()
+    symbol = symbol.upper()
+    if interval not in ("5m", "15m", "1h", "4h") or not re.fullmatch(r"[A-Z0-9]{5,20}", symbol):
+        raise HTTPException(400, "Geçersiz coin veya zaman dilimi")
+    limit = max(30, min(limit, 200))
+    try:
+        candles = await e.client.klines(symbol, interval, 250)
+    except Exception as ex:  # noqa: BLE001
+        raise HTTPException(502, f"Grafik verisi alınamadı: {ex}")
+    closes = [c.close for c in candles]
+    e21, e50 = ind.ema(closes, 21), ind.ema(closes, 50)
+    cut = len(candles) - limit
+    cs = candles[cut:]
+    async with e.db.session() as s:
+        trades = (await s.execute(select(Trade).where(Trade.symbol == symbol).order_by(Trade.created_at))).scalars().all()
+        pos = (await s.execute(select(Position).where(Position.symbol == symbol, Position.status == "open"))).scalars().first()
+    t0 = cs[0].open_time if cs else 0
+    markers = []
+    for t in trades:
+        ms = int(t.created_at.replace(tzinfo=_dt.timezone.utc).timestamp() * 1000)
+        if ms >= t0:
+            markers.append({"time": ms, "side": t.side, "price": t.price, "note": t.note})
+    return {
+        "symbol": symbol, "interval": interval,
+        "candles": [{"t": c.open_time, "o": c.open, "h": c.high, "l": c.low, "c": c.close, "v": c.volume} for c in cs],
+        "ema21": [_nn(v) for v in e21[cut:]], "ema50": [_nn(v) for v in e50[cut:]],
+        "markers": markers,
+        "position": {"entry": pos.entry_price, "take_profit": pos.take_profit, "stop_loss": pos.stop_loss} if pos else None,
+        "analysis": e.latest[symbol].to_dict() if symbol in e.latest else None,
+    }
 
 
 @app.get("/api/activity", dependencies=[Depends(auth)])

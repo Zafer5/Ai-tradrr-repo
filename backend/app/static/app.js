@@ -1,6 +1,6 @@
 "use strict";
 const TABS = [
-  ["home", "Ana Sayfa"], ["live", "Canlı"], ["scanner", "Tarayıcı"], ["ai", "Analizler"], ["positions", "Pozisyonlar"],
+  ["home", "Ana Sayfa"], ["live", "Canlı"], ["chart", "Grafik"], ["scanner", "Tarayıcı"], ["ai", "Analizler"], ["positions", "Pozisyonlar"],
   ["history", "Geçmiş"], ["report", "Kâr-Zarar"], ["settings", "Bot Ayarları"], ["risk", "Risk"],
   ["api", "Bağlantılar"], ["logs", "Günlükler"],
 ];
@@ -82,6 +82,70 @@ V.live = async () => {
   return `${status}<div class="card"><div class="row"><span>${prog}</span><span class="small">Takipte ${d.tracked} coin · alım eşiği ${d.min_score} puan</span></div></div>
   <div class="card">${d.items.map(i => `<div class="row"><div><b class="${cls[i.action] || ""}">${icon[i.action] || ""}</b> ${i.symbol !== "-" ? "<b>" + esc(i.symbol) + "</b>" : ""}${i.score != null ? ` <span class="score ${scoreCls(i.score)}">${i.score}</span>` : ""}
     <div class="small">${esc(i.text)}</div></div><span class="small">${t(i.at)}</span></div>`).join("") || "Henüz kayıt yok. Botu başlatınca burada kararlarını göreceksin."}</div>`;
+};
+
+let chartSym = null, chartTf = "15m";
+function drawChart(d) {
+  const W = 600, H = 340, PL = 6, PR = 62, PT = 8, PB = 18, VH = 50;
+  const cs = d.candles;
+  if (!cs.length) return "<div class='card'>Veri yok.</div>";
+  let lo = Math.min(...cs.map(c => c.l)), hi = Math.max(...cs.map(c => c.h));
+  const lines = [];
+  if (d.position) {
+    [["entry", "Alış", "#4da3ff"], ["take_profit", "Hedef", "#2ecc71"], ["stop_loss", "Stop", "#ff5c5c"]].forEach(([k, l, col]) => {
+      const v = d.position[k];
+      if (v > lo * 0.9 && v < hi * 1.1) { lines.push([v, l, col]); lo = Math.min(lo, v); hi = Math.max(hi, v); }
+    });
+  }
+  const pad = (hi - lo) * 0.05 || hi * 0.001; lo -= pad; hi += pad;
+  const ph = H - PT - PB - VH, n = cs.length, cw = (W - PL - PR) / n;
+  const X = i => PL + (i + 0.5) * cw, Y = v => PT + (hi - v) / (hi - lo) * ph;
+  const vmax = Math.max(...cs.map(c => c.v)) || 1;
+  let g = "";
+  for (let k = 0; k <= 4; k++) {
+    const v = lo + (hi - lo) * k / 4, y = Y(v);
+    g += `<line x1="${PL}" x2="${W - PR}" y1="${y}" y2="${y}" stroke="#2a333d" stroke-width="0.5"/><text x="${W - PR + 4}" y="${y + 3}" fill="#8b98a5" font-size="10">${px(v)}</text>`;
+  }
+  cs.forEach((c, i) => {
+    const up = c.c >= c.o, col = up ? "#2ecc71" : "#ff5c5c", x = X(i);
+    g += `<line x1="${x}" x2="${x}" y1="${Y(c.h)}" y2="${Y(c.l)}" stroke="${col}" stroke-width="1"/>`;
+    const y1 = Y(Math.max(c.o, c.c)), y2 = Y(Math.min(c.o, c.c));
+    g += `<rect x="${x - cw * 0.35}" y="${y1}" width="${cw * 0.7}" height="${Math.max(1, y2 - y1)}" fill="${col}"/>`;
+    const vh = c.v / vmax * VH;
+    g += `<rect x="${x - cw * 0.35}" y="${H - PB - vh}" width="${cw * 0.7}" height="${vh}" fill="${col}" opacity="0.35"/>`;
+  });
+  [[d.ema21, "#f5b342"], [d.ema50, "#b07cff"]].forEach(([arr, col]) => {
+    const pts = arr.map((v, i) => v == null ? null : `${X(i)},${Y(v)}`).filter(Boolean).join(" ");
+    if (pts) g += `<polyline points="${pts}" fill="none" stroke="${col}" stroke-width="1.3"/>`;
+  });
+  lines.forEach(([v, l, col]) => {
+    const y = Y(v);
+    g += `<line x1="${PL}" x2="${W - PR}" y1="${y}" y2="${y}" stroke="${col}" stroke-width="1" stroke-dasharray="5 3"/><text x="${PL + 3}" y="${y - 3}" fill="${col}" font-size="10">${l} ${px(v)}</text>`;
+  });
+  const step = cs.length > 1 ? cs[1].t - cs[0].t : 1;
+  d.markers.forEach(m => {
+    const i = Math.min(n - 1, Math.max(0, Math.floor((m.time - cs[0].t) / step)));
+    const x = X(i), y = Y(m.price), buy = m.side === "BUY";
+    const tri = buy ? `${x},${y - 3} ${x - 7},${y + 11} ${x + 7},${y + 11}` : `${x},${y + 3} ${x - 7},${y - 11} ${x + 7},${y - 11}`;
+    g += `<polygon points="${tri}" fill="${buy ? "#4da3ff" : "#ffffff"}" stroke="#000" stroke-width="0.8"><title>${buy ? "ALIŞ" : "SATIŞ"} ${px(m.price)} ${esc(m.note)}</title></polygon>`;
+  });
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;background:#12181e;border-radius:10px">${g}</svg>
+  <div class="small" style="margin-top:6px"><span style="color:#f5b342">━ EMA21</span> · <span style="color:#b07cff">━ EMA50</span> · <span style="color:#4da3ff">▲ bot alış</span> · <span>▼ bot satış (beyaz)</span> · kesikli çizgiler: açık pozisyonun alış/hedef/stop seviyesi</div>`;
+}
+
+V.chart = async () => {
+  const [sc, po] = await Promise.all([api("/api/scanner"), api("/api/positions?state=open")]);
+  const syms = [...new Set([...po.map(p => p.symbol), ...sc.coins.map(c => c.symbol)])];
+  if (!syms.length) return `<div class="card">Coin listesi henüz hazır değil. Birkaç dakika sonra tekrar bak.</div>`;
+  if (!chartSym || !syms.includes(chartSym)) chartSym = syms[0];
+  const d = await api(`/api/chart/${chartSym}?interval=${chartTf}`);
+  const a = d.analysis;
+  return `<div class="card"><select id="csym" onchange="chartSym=this.value.split(' ')[0];load()" style="width:100%;padding:10px;border-radius:8px;background:var(--bg);color:var(--text);border:1px solid var(--line);font-size:15px">
+    ${syms.map(s => `<option ${s === chartSym ? "selected" : ""}>${s}${po.some(p => p.symbol === s) ? "  ● açık pozisyon" : ""}</option>`).join("")}</select>
+    <div style="display:flex;gap:6px;margin-top:8px">${["5m", "15m", "1h", "4h"].map(t => `<button class="btn ${t === chartTf ? "" : "grey"}" style="margin:0;padding:8px" onclick="chartTf='${t}';load()">${t}</button>`).join("")}</div></div>
+  ${drawChart(d)}
+  ${a ? `<div class="card" style="margin-top:10px"><div class="row"><b>Botun puanı</b><span class="score ${scoreCls(a.score)}">${a.score} · ${esc(a.label)}</span></div>
+    ${a.reasons.length ? `<ul>${a.reasons.map(r => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}${a.warnings.length ? `<ul class="neg">${a.warnings.map(r => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}</div>` : ""}`;
 };
 
 V.scanner = async () => {

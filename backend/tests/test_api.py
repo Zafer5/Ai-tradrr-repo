@@ -75,3 +75,12 @@ def test_keys_testnet_only_and_never_returned(client, tmp_path, monkeypatch):
 def test_activity_feed(client):
     d = client.get("/api/activity", headers=h()).json()
     assert d["running"] is False and d["items"] == [] and "min_score" in d
+
+
+def test_chart_endpoint(client):
+    r = client.get("/api/chart/AAAUSDT?interval=15m", headers=h())
+    assert r.status_code == 200
+    d = r.json()
+    assert len(d["candles"]) == 120 and len(d["ema21"]) == 120 and d["markers"] == [] and d["position"] is None
+    assert client.get("/api/chart/AAAUSDT?interval=2m", headers=h()).status_code == 400
+    assert client.get("/api/chart/..%2Fx", headers=h()).status_code in (400, 404)
