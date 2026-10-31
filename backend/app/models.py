@@ -115,3 +115,52 @@ class EquitySnapshot(Base):
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     equity: Mapped[float] = mapped_column(Float)
     cash: Mapped[float] = mapped_column(Float)
+
+
+class Holding(Base):
+    """Kullanıcının MEVCUT coinleri (elle girilmiş veya Binance'ten salt okunur çekilmiş).
+    Bu kayıtlar paper trading hesabından AYRIDIR. Gerçek hesapta emir gönderilmez; yönetim 'gölge' (sanal) yapılır."""
+
+    __tablename__ = "holdings"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    asset: Mapped[str] = mapped_column(String(16), unique=True)  # BTC
+    symbol: Mapped[str] = mapped_column(String(24))  # BTCUSDT
+    quantity: Mapped[float] = mapped_column(Float)
+    avg_cost: Mapped[float] = mapped_column(Float, default=0.0)  # USDT başına
+    cost_known: Mapped[bool] = mapped_column(Boolean, default=False)
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    fees_paid: Mapped[float] = mapped_column(Float, default=0.0)
+    source: Mapped[str] = mapped_column(String(12), default="manual")  # manual | binance
+    managed: Mapped[bool] = mapped_column(Boolean, default=True)  # False = işlem dışı bırak
+    peak_price: Mapped[float] = mapped_column(Float, default=0.0)
+    trailing_active: Mapped[bool] = mapped_column(Boolean, default=False)
+    note: Mapped[str] = mapped_column(String(200), default="")
+    last_decision: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PortfolioAction(Base):
+    """Portföy yöneticisinin önerileri / gölge işlemleri."""
+
+    __tablename__ = "portfolio_actions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    asset: Mapped[str] = mapped_column(String(16), index=True)
+    action: Mapped[str] = mapped_column(String(16))  # TAKE_PROFIT | TRAIL_EXIT | REDUCE_RISK | STOP
+    mode: Mapped[str] = mapped_column(String(10))  # oneri | golge
+    fraction: Mapped[float] = mapped_column(Float, default=0.0)
+    quantity: Mapped[float] = mapped_column(Float, default=0.0)
+    price: Mapped[float] = mapped_column(Float, default=0.0)
+    net_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    reason: Mapped[str] = mapped_column(Text, default="")
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    kind: Mapped[str] = mapped_column(String(24), index=True)
+    level: Mapped[str] = mapped_column(String(8), default="info")  # info | good | warn | bad
+    title: Mapped[str] = mapped_column(String(120))
+    body: Mapped[str] = mapped_column(Text, default="")
+    read: Mapped[bool] = mapped_column(Boolean, default=False)

@@ -17,11 +17,15 @@ from datetime import timedelta
 from sqlalchemy import delete, select
 
 from ..analysis.engine import TIMEFRAMES, Analysis, PlanParams, analyze_symbol, build_plan
+from ..analysis.regime import Regime, evaluate_regime
 from ..exchange.binance import BinanceClient
 from ..exchange.stream import PriceFeed
 from ..exchange.types import Candles
 from ..kv import kv_get, kv_set
 from ..market.scanner import Candidate, ScanResult, scan
+from ..notify import Notifier
+from ..portfolio.manager import MarketView
+from ..portfolio.service import PortfolioService
 from ..models import AnalysisLog, EquitySnapshot, LogEntry, utcnow
 from ..risk.manager import EntryRequest, SystemFlags, evaluate_entry
 from ..trading_settings import SettingsStore, TradingSettings
@@ -30,13 +34,23 @@ from .service import TradingService
 
 log = logging.getLogger("app.bot")
 STATE_KEY = "bot_state"
-CANDLE_TTL = {"5m": 45, "15m": 120, "1h": 420, "4h": 1200}
+CANDLE_TTL = {"5m": 45, "15m": 120, "1h": 420, "4h": 1200, "1d": 3600}
+LISTS_KEY = "coin_lists"
+SHOCK_PAUSE_SEC = 45 * 60
 STALE_FEED_SEC = 60
 
 
 class BotRunner:
-    def __init__(self, db, store: SettingsStore, client: BinanceClient, feed: PriceFeed, service: TradingService):
+    def __init__(self, db, store: SettingsStore, client: BinanceClient, feed: PriceFeed, service: TradingService,
+                 notifier: Notifier, portfolio: PortfolioService):
         self.db, self.store, self.client, self.feed, self.service = db, store, client, feed, service
+        self.notifier, self.portfolio = notifier, portfolio
+        self.regime: Regime | None = None
+        self.shock_until = 0.0
+        self._last_pf_eval = 0.0
+        self._daily_report_date = ""
+        self._loss_notified_date = ""
+        self._was_safe = False
         self.enabled = False
         self.emergency = False
         self.emergency_reason = ""
@@ -103,6 +117,7 @@ class BotRunner:
         self.emergency_reason = f"Elle tetiklendi ({time.strftime('%d.%m.%Y %H:%M:%S')})"
         await self._save_state()
         log.error("ACİL DURDURMA tetiklendi (pozisyonları kapat: %s)", close_positions)
+        await self.notifier.send("emergency", "ACİL DURDURMA", "Bot kapatıldı, yeni alım engellendi." + (" Açık pozisyonlar kapatılıyor." if close_positions else ""), "bad")
         closed = 0
         if close_positions:
             s = await self.store.get()
@@ -150,22 +165,35 @@ class BotRunner:
             self._symbols_at = time.time()
         tickers = await self.client.tickers_24h()
         res = scan(self.symbols, tickers, s)
+        lists = await self.coin_lists()
+        res.candidates = [c for c in res.candidates if c.symbol not in lists["exclude"]]
+        # takip listesi + portföydeki coinler de analiz edilir (tarayıcı elemiş olsa bile)
+        held = await self.portfolio.symbols()
+        have = {c.symbol for c in res.candidates}
+        extra = []
+        for sym in (set(lists["watch"]) | held) - have:
+            tk, info = tickers.get(sym), self.symbols.get(sym)
+            if tk and info and tk.last > 0:
+                extra.append(Candidate(sym, info.base, tk.last, tk.quote_volume, tk.change_pct, tk.spread_pct or 0.0, tk.trades))
         plan = PlanParams.from_settings(s)
         sem = asyncio.Semaphore(8)
+        await self._update_regime(s)
 
         async def one(c: Candidate) -> Analysis:
             async with sem:
                 candles = await self.get_candles(c.symbol)
-            return await asyncio.to_thread(analyze_symbol, c.symbol, candles, None, plan, c.spread_pct, c.quote_volume)
+            return await asyncio.to_thread(analyze_symbol, c.symbol, candles, None, plan, c.spread_pct, c.quote_volume, c.change_pct)
 
-        results = await asyncio.gather(*(one(c) for c in res.candidates), return_exceptions=True)
+        to_analyze = res.candidates + extra
+        results = await asyncio.gather(*(one(c) for c in to_analyze), return_exceptions=True)
         analyses: dict[str, Analysis] = {}
         failed = 0
-        for c, r in zip(res.candidates, results):
+        for c, r in zip(to_analyze, results):
             if isinstance(r, Exception):
                 failed += 1
                 log.warning("%s analiz edilemedi: %s", c.symbol, r)
             else:
+                r.held = c.symbol in held
                 analyses[c.symbol] = r
         if res.candidates and not analyses:
             raise RuntimeError("Hiçbir coin için mum verisi alınamadı")
@@ -180,20 +208,72 @@ class BotRunner:
         if self.enabled and not self.emergency:
             await self.try_entries(s)
 
+    # ------------------------------------------------------------------ piyasa rejimi / listeler
+    async def coin_lists(self) -> dict:
+        async with self.db.session() as ses:
+            d = await kv_get(ses, LISTS_KEY, {})
+        return {"watch": d.get("watch", []), "exclude": d.get("exclude", [])}
+
+    async def save_coin_lists(self, watch: list[str], exclude: list[str]) -> dict:
+        clean = lambda xs: sorted({x.strip().upper() for x in xs if x.strip().isalnum()})  # noqa: E731
+        d = {"watch": clean(watch), "exclude": clean(exclude)}
+        async with self.db.session() as ses:
+            await kv_set(ses, LISTS_KEY, d)
+            await ses.commit()
+        return d
+
+    async def _update_regime(self, s: TradingSettings) -> None:
+        """BTC yönü ve ani düşüş koruması. Veri alınamazsa rejim 'Bilinmiyor' kalır (alım engellenmez ama güvenli mod ayrıca çalışır)."""
+        try:
+            btc = await self.get_candles("BTCUSDT")
+        except Exception as e:
+            log.warning("BTC verisi alınamadı: %s", e)
+            return
+        r = evaluate_regime(btc, int(time.time() * 1000), s.market_shock_pct)
+        if r.shock and time.time() >= self.shock_until:
+            log.error("ANİ DÜŞÜŞ KORUMASI: %s — yeni alımlar %d dk durduruldu", r.shock_reason, SHOCK_PAUSE_SEC // 60)
+            await self.notifier.send("shock", "Ani düşüş koruması devrede", f"{r.shock_reason}. Yeni alımlar {SHOCK_PAUSE_SEC // 60} dakika durduruldu.", "bad")
+        if r.shock:
+            self.shock_until = time.time() + SHOCK_PAUSE_SEC
+        self.regime = r
+
+    @property
+    def shock_active(self) -> bool:
+        return time.time() < self.shock_until
+
+    def _flags(self, s: TradingSettings) -> SystemFlags:
+        extra = 10.0 if (s.btc_filter_enabled and self.regime and self.regime.direction == "Düşüş") else 0.0
+        shock = (self.regime.shock_reason or "BTC ani düşüş") if self.shock_active and self.regime else None
+        return SystemFlags(self.emergency, self.safe_reason, shock, extra)
+
+    def market_views(self) -> dict[str, MarketView]:
+        shock = self.shock_active
+        direction = self.regime.direction if self.regime else None
+        return {sym: MarketView(a.score if a.eligible else None, a.trend if a.eligible else None, a.sell_fit if a.eligible else None,
+                                a.downside_risk if a.eligible else None, a.risk if a.eligible else None, shock, direction)
+                for sym, a in self.analyses.items()}
+
     # ------------------------------------------------------------------ alım
     def _record(self, a: Analysis, approved: bool, reasons: list[str]) -> None:
         self.decisions.appendleft({"ts": time.time(), "symbol": a.symbol, "score": a.score, "approved": approved, "reasons": reasons})
 
     async def try_entries(self, s: TradingSettings) -> None:
+        held = await self.portfolio.symbols()
+        lists = await self.coin_lists()
         ranked = sorted((a for a in self.analyses.values() if a.eligible and a.score >= s.buy_score_threshold), key=lambda a: -a.score)
         for a in ranked:
+            if a.symbol in held:
+                self._record(a, False, ["Bu coin mevcut portföyünüzde: yeni alım yapılmaz, ayrı yönetilir (mükerrer işlem engeli)"])
+                continue
+            if a.symbol in lists["exclude"]:
+                continue
             async with self.trade_lock:
                 if not self.enabled or self.emergency:
                     return
                 await self._consider_entry(a, s)
 
     async def _consider_entry(self, a: Analysis, s: TradingSettings) -> None:
-        flags = SystemFlags(self.emergency, self.safe_reason)
+        flags = self._flags(s)
         try:
             bid, ask = await self.client.book_ticker(a.symbol)
         except Exception as e:  # API hatası => emir yok
@@ -207,16 +287,22 @@ class BotRunner:
         atr_abs = a.atr_pct / 100 * a.price
         stop, tp1, tp2 = build_plan(ask, atr_abs, PlanParams.from_settings(s))
         acct = await self.service.snapshot(dict(self.feed.prices), self.in_flight, s.cooldown_minutes)
-        req = EntryRequest(a.symbol, a.score, a.risk, a.eligible, spread, ask * (1 + s.slippage_pct / 100), stop, tp1, tp2)
+        req = EntryRequest(symbol=a.symbol, score=a.score, risk_level=a.risk, eligible=a.eligible, spread_pct=spread, change_pct=a.change_pct,
+                          entry=ask * (1 + s.slippage_pct / 100), stop=stop, tp1=tp1, tp2=tp2)
         dec = evaluate_entry(req, acct, flags, s, self.symbols.get(a.symbol))
         self._record(a, dec.approved, dec.reasons)
         if not dec.approved:
             return
         self.in_flight.add(a.symbol)
         try:
-            await self.service.open_position(a.symbol, ask, dec, stop, tp1, tp2, a.score, a.risk, " ".join(a.rationale), s)
+            pos = await self.service.open_position(a.symbol, ask, dec, stop, tp1, tp2, a.score, a.risk, " ".join(a.rationale), s)
         finally:
             self.in_flight.discard(a.symbol)
+        if pos:
+            await self.notifier.send(
+                "buy", f"ALIM (sanal): {a.symbol.replace('USDT', '')}",
+                f"{pos.quantity:.6g} adet @ {pos.entry_price:.6g} (≈{pos.quantity * pos.entry_price:.2f} USDT)\nStop {stop:.6g} · Hedef1 {tp1:.6g} · Hedef2 {tp2:.6g}\n"
+                f"Neden (AI puanı {a.score:.0f}, risk {a.risk}): {' '.join(a.rationale[:2])}\nGüvenli işlem: risk kontrolü onayladı, tahmini komisyon {pos.est_fees:.3f} USDT.", "info")
 
     # ------------------------------------------------------------------ pozisyon izleme
     async def _monitor_loop(self) -> None:
@@ -245,6 +331,7 @@ class BotRunner:
         s = await self.store.get()
         positions = await self.service.open_positions()
         self._update_safe_mode(bool(positions))
+        await self._side_tasks(s)
         if not positions:
             return
         if self.feed.age > STALE_FEED_SEC:
@@ -262,7 +349,52 @@ class BotRunner:
                 await self.service.update_position_state(p.id, ev.peak, ev.trailing_active)
             if ev.action:
                 async with self.trade_lock:
-                    await self.service.execute_exit(p.id, ev.action, s)
+                    after = await self.service.execute_exit(p.id, ev.action, s)
+                if after:
+                    await self._notify_exit(after, ev.action)
+
+    async def _side_tasks(self, s: TradingSettings) -> None:
+        """Bildirimler ve portföy değerlendirmesi (her ~10 sn)."""
+        if self.safe_reason and not self._was_safe:
+            await self.notifier.send("safe", "Güvenli mod: yeni alımlar durdu", self.safe_reason, "bad", "safe", 600)
+        self._was_safe = bool(self.safe_reason)
+        if time.time() - self._last_pf_eval < 10 or not self.feed.prices or self.feed.age > STALE_FEED_SEC:
+            return
+        self._last_pf_eval = time.time()
+        snap = await self.service.snapshot(dict(self.feed.prices), set(), 0)
+        from .service import today_str
+
+        if snap.day_pnl_pct <= -s.daily_loss_limit_pct and self._loss_notified_date != today_str():
+            self._loss_notified_date = today_str()
+            await self.notifier.send("loss_limit", "Günlük zarar limiti aşıldı", f"Bugünkü sonuç %{snap.day_pnl_pct:.2f}. Gün sonuna kadar yeni alım yapılmayacak; açık pozisyonlar korunmaya devam ediyor.", "bad")
+        await self.portfolio.evaluate_all(dict(self.feed.prices), self.market_views(), s)
+        await self._maybe_daily_report()
+
+    async def _maybe_daily_report(self) -> None:
+        from datetime import datetime
+
+        from .service import TZ, today_str
+
+        now = datetime.now(TZ)
+        if now.hour == 23 and now.minute >= 55 and self._daily_report_date != today_str():
+            self._daily_report_date = today_str()
+            from ..report import build_daily_report
+
+            title, body = await build_daily_report(self.db, self.service, dict(self.feed.prices))
+            await self.notifier.send("daily_report", title, body, "info")
+
+    async def _notify_exit(self, pos, action: ExitAction) -> None:
+        from .exits import REASON_TR
+
+        why = REASON_TR.get(action.reason, action.reason)
+        coin = pos.symbol.replace("USDT", "")
+        if pos.status == "CLOSED":
+            lvl = "good" if pos.realized_pnl > 0 else "bad"
+            await self.notifier.send("sell", f"SATIŞ (sanal): {coin} — {why}", f"Pozisyon kapandı. Net sonuç (komisyon dahil): {pos.realized_pnl:+.3f} USDT\nNeden: {why}.", lvl)
+            if action.reason == "STOP_LOSS":
+                await self.notifier.send("stoploss", f"Zarar sınırına ulaşıldı: {coin}", f"Stop-loss çalıştı, kayıp {pos.realized_pnl:+.3f} USDT. Sermaye korunuyor.", "warn")
+        else:
+            await self.notifier.send("sell", f"KISMİ SATIŞ (sanal): {coin} — {why}", f"Pozisyonun bir kısmı satıldı, kalan {pos.quantity:.6g}. Stop başa baş üstüne çekildi. Şu ana kadar net {pos.realized_pnl:+.3f} USDT.", "good")
 
     async def close_position_manually(self, position_id: int) -> bool:
         s = await self.store.get()
@@ -272,7 +404,10 @@ class BotRunner:
         if not p or not price:
             return False
         async with self.trade_lock:
-            return await self.service.execute_exit(p.id, ExitAction(1.0, "MANUAL", "MARKET", price), s) is not None
+            after = await self.service.execute_exit(p.id, ExitAction(1.0, "MANUAL", "MARKET", price), s)
+        if after:
+            await self._notify_exit(after, ExitAction(1.0, "MANUAL", "MARKET", price))
+        return after is not None
 
     # ------------------------------------------------------------------ bakım
     async def _log_analyses(self, analyses: dict[str, Analysis]) -> None:

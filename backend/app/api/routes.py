@@ -137,6 +137,7 @@ def _market_status(c) -> dict:
         "scan_error": b.last_scan_error, "scan_errors": b.scan_errors, "scan_duration_sec": round(b.scan_duration, 1),
         "binance_error": c.client.last_error, "used_weight_1m": c.client.used_weight_1m,
         "tracked": len(b.scan_result.candidates) if b.scan_result else 0,
+        "regime": b.regime.to_dict() if b.regime else None, "shock_active": b.shock_active,
     }
 
 
@@ -159,7 +160,7 @@ async def dashboard(request: Request):
         today_pos = list((await ses.execute(select(Position).where(Position.closed_at >= day_start_utc()))).scalars())
         snaps = list((await ses.execute(select(EquitySnapshot).order_by(EquitySnapshot.id.desc()).limit(240))).scalars())
     realized_today = sum(p.realized_pnl for p in today_pos)
-    top = sorted((a for a in c.bot.analyses.values() if a.eligible), key=lambda a: -a.score)[:6]
+    top = sorted((a for a in c.bot.analyses.values() if a.eligible and not a.held), key=lambda a: -a.score)[:6]
     return {
         "bot": _bot_status(c), "market": _market_status(c), "account": await account_summary(c),
         "open_positions": [pos_dict(p, prices.get(p.symbol), s) for p in open_pos],
@@ -217,6 +218,7 @@ async def scanner(request: Request):
         cand["trend"] = a.trend if a and a.eligible else None
         cand["risk"] = a.risk if a and a.eligible else None
         cand["skip_reason"] = a.skip_reason if a and not a.eligible else None
+        cand["tags"] = a.tags if a and a.eligible else []
     return {"ready": True, **d}
 
 
@@ -438,7 +440,10 @@ async def connections(request: Request):
     async with c.db.session() as ses:
         creds = {r.env: r for r in (await ses.execute(select(ApiCredential))).scalars()}
     t = creds.get("testnet")
+    ro = creds.get("readonly")
     return {
+        "readonly": {"configured": bool(ro), "key_hint": ro.key_hint if ro else None, "updated_at": iso(ro.updated_at) if ro else None},
+        "telegram": c.notifier.telegram_enabled,
         "market_data": {"base_url": c.cfg.binance_rest_url, "ws_connected": c.feed.ws_connected,
                         "last_error": c.client.last_error, "needs_key": False},
         "testnet": {"configured": bool(t), "key_hint": t.key_hint if t else None, "updated_at": iso(t.updated_at) if t else None,
@@ -485,7 +490,7 @@ async def test_testnet(request: Request):
     if not row:
         raise HTTPException(404, "Önce Testnet anahtarlarını kaydedin.")
     try:
-        client = BinanceClient(c.cfg.binance_testnet_rest_url, c.auth.vault.decrypt(row.api_key_enc), c.auth.vault.decrypt(row.api_secret_enc))
+        client = c.make_client(c.auth.vault.decrypt(row.api_key_enc), c.auth.vault.decrypt(row.api_secret_enc), c.cfg.binance_testnet_rest_url)
     except ValueError as e:
         raise HTTPException(500, str(e))
     try:

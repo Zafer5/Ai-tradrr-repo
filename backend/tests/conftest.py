@@ -6,6 +6,7 @@ from app.main import create_app
 from tests.fake_binance import build_fake_binance
 
 PASSWORD = "test-password-123"
+FAKE_KEY, FAKE_SECRET = "FAKEKEY1234567890ABCDEF", "FAKESECRET1234567890ABCDEFGH"
 
 
 @pytest.fixture

@@ -18,7 +18,21 @@ def F(default, label: str, group: str, unit: str = "", help: str = "", **kw):
     return Field(default, json_schema_extra={"label": label, "group": group, "unit": unit, "help": help}, **kw)
 
 
+PROFILES: dict[str, dict] = {
+    "dusuk": dict(risk_per_trade_pct=0.5, daily_loss_limit_pct=1.0, max_open_positions=3, max_symbol_alloc_pct=3.0,
+                  max_total_exposure_pct=10.0, buy_score_threshold=80.0, allow_high_risk=False, max_chase_change_pct=10.0, market_shock_pct=2.0),
+    "dengeli": dict(risk_per_trade_pct=1.0, daily_loss_limit_pct=2.0, max_open_positions=5, max_symbol_alloc_pct=5.0,
+                    max_total_exposure_pct=20.0, buy_score_threshold=70.0, allow_high_risk=False, max_chase_change_pct=15.0, market_shock_pct=2.5),
+    "yuksek": dict(risk_per_trade_pct=1.5, daily_loss_limit_pct=3.0, max_open_positions=7, max_symbol_alloc_pct=7.0,
+                   max_total_exposure_pct=30.0, buy_score_threshold=65.0, allow_high_risk=False, max_chase_change_pct=20.0, market_shock_pct=3.0),
+}
+PROFILE_LABELS = {"dusuk": "Düşük risk", "dengeli": "Dengeli", "yuksek": "Yüksek risk", "ozel": "Özel"}
+# Not: "Yüksek risk" bile kaldıraç/vadeli işlem açmaz; yalnızca limitleri biraz genişletir.
+
+
 class TradingSettings(BaseModel):
+    risk_profile: Literal["dusuk", "dengeli", "yuksek", "ozel"] = F("dengeli", "Risk profili", "Genel", "", "Profil seçmek ilgili risk limitlerini topluca ayarlar.")
+
     # ---- Paper trading hesabı ----
     initial_balance: float = F(1000.0, "Başlangıç sanal bakiye", "Genel", "USDT",
                                "Yalnızca 'Sanal hesabı sıfırla' işleminde kullanılır.", ge=10, le=10_000_000)
@@ -35,6 +49,18 @@ class TradingSettings(BaseModel):
     # ---- Alım kararı ----
     buy_score_threshold: float = F(70.0, "Alım için asgari AI puanı", "Alım", "puan", "70-84 değerlendirilebilir, 85+ çok güçlü.", ge=50, le=100)
     allow_high_risk: bool = F(False, "Yüksek riskli coinlere izin ver", "Alım")
+
+    max_chase_change_pct: float = F(15.0, "Kovalama sınırı (24s yükseliş)", "Alım", "%", "24 saatte bundan fazla yükselmiş coinin peşinden alım yapılmaz; geri çekilme beklenir.", ge=3, le=100)
+    btc_filter_enabled: bool = F(True, "BTC yön filtresi", "Alım", "", "BTC düşüş trendindeyken alım eşiği +10 puan yükselir.")
+    market_shock_pct: float = F(2.5, "Ani düşüş koruması (BTC 1 saatlik düşüş)", "Alım", "%", "BTC bu kadar düşerse yeni alımlar bir süre durdurulur.", ge=0.5, le=15)
+
+    # ---- Mevcut portföy yönetimi ----
+    portfolio_mode: Literal["off", "watch", "manage"] = F("watch", "Mevcut coin yönetimi", "Portföy", "", "off: kapalı | watch: izle ve öner | manage: gölge (sanal) yönetim. Gerçek hesapta emir GÖNDERİLMEZ.")
+    holding_target_pct: float = F(5.0, "Mevcut coin hedef kâr (temel)", "Portföy", "%", "Piyasaya göre otomatik ayarlanır.", ge=1, le=100)
+    holding_sell_fraction: float = F(0.5, "Hedefte satılacak oran", "Portföy", "0-1", "", ge=0.1, le=1.0)
+    holding_trail_activation_pct: float = F(4.0, "Mevcut coin trailing başlangıç kârı", "Portföy", "%", "", ge=1, le=100)
+    holding_trail_distance_pct: float = F(1.5, "Mevcut coin trailing mesafesi", "Portföy", "%", "", ge=0.3, le=50)
+    holding_stop_pct: float = F(0.0, "Mevcut coin zarar sınırı (0 = kapalı)", "Portföy", "%", "0 ise zarardaki coin otomatik satılmaz, yalnızca uyarılır.", ge=0, le=60)
 
     # ---- Hedef / çıkış ----
     target_mode: Literal["rr", "percent"] = F("rr", "Hedef yöntemi", "Hedefler", "", "rr: risk katı | percent: sabit yüzde")
@@ -116,6 +142,9 @@ class SettingsStore:
     async def update(self, values: dict[str, Any]) -> TradingSettings:
         current = (await self.get()).model_dump()
         current.update(values)
+        if "risk_profile" not in values and any(k in values for k in PROFILES["dengeli"]):
+            # profil alanları elle değiştirildi: adlı bir profille birebir eşleşiyorsa o profil, değilse "özel"
+            current["risk_profile"] = next((n for n, p in PROFILES.items() if all(current[k] == v for k, v in p.items())), "ozel")
         new = TradingSettings(**current)  # ValidationError yukarıya fırlar
         async with self.db.session() as s:
             row = (await s.execute(select(KV).where(KV.key == self.KEY))).scalar_one_or_none()
@@ -126,6 +155,11 @@ class SettingsStore:
             await s.commit()
         self._cache = new
         return new
+
+    async def apply_profile(self, name: str) -> TradingSettings:
+        if name not in PROFILES:
+            raise ValueError("Geçersiz risk profili")
+        return await self.update({**PROFILES[name], "risk_profile": name})
 
     async def reset(self) -> TradingSettings:
         return await self.update(TradingSettings().model_dump())

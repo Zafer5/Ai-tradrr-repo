@@ -8,13 +8,17 @@ from __future__ import annotations
 
 import time
 
-from fastapi import FastAPI, HTTPException, Query
+import hashlib
+import hmac
+
+from fastapi import FastAPI, HTTPException, Query, Request
 
 from app.exchange.types import INTERVAL_MS
 from tests.synth import make_candles
 
 # sembol -> (drift/saat, oynaklık/√saat, fiyat, 24s hacim, spread %, mum sınırı)
 PROFILES = {
+    "BTCUSDT": dict(drift=0.0003, vol=0.002, price=60000.0, qv=900e6, spread=0.01, seed=8),
     "AAAUSDT": dict(drift=0.0015, vol=0.004, price=50.0, qv=90e6, spread=0.02, seed=1),
     "BBBUSDT": dict(drift=-0.0015, vol=0.004, price=30.0, qv=70e6, spread=0.02, seed=2),
     "CCCUSDT": dict(drift=0.0, vol=0.004, price=10.0, qv=60e6, spread=0.03, seed=3),
@@ -95,5 +99,37 @@ def build_fake_binance() -> FastAPI:
         c = _series(symbol, interval, limit)
         return [[int(c.open_time[i]), f"{c.open[i]:.8f}", f"{c.high[i]:.8f}", f"{c.low[i]:.8f}", f"{c.close[i]:.8f}",
                  f"{c.volume[i]:.8f}", int(c.close_time[i]), "0", 100, "0", "0", "0"] for i in range(len(c))]
+
+    FAKE_KEY, FAKE_SECRET = "FAKEKEY1234567890ABCDEF", "FAKESECRET1234567890ABCDEFGH"
+    app.state.keys = (FAKE_KEY, FAKE_SECRET)
+
+    def check_signed(request: Request):
+        """Binance kuralı: X-MBX-APIKEY başlığı + imza = HMAC-SHA256(sorgu dizesi, secret)."""
+        if request.headers.get("x-mbx-apikey") != FAKE_KEY:
+            raise HTTPException(401, {"code": -2015, "msg": "Invalid API-key, IP, or permissions for action."})
+        qs = request.url.query
+        if "&signature=" not in qs:
+            raise HTTPException(400, {"code": -1102, "msg": "Mandatory parameter 'signature' was not sent."})
+        body, sig = qs.rsplit("&signature=", 1)
+        if not hmac.compare_digest(sig, hmac.new(FAKE_SECRET.encode(), body.encode(), hashlib.sha256).hexdigest()):
+            raise HTTPException(400, {"code": -1022, "msg": "Signature for this request is not valid."})
+
+    @app.get("/api/v3/account")
+    def account(request: Request):
+        check_signed(request)
+        return {"canTrade": True, "canWithdraw": False, "permissions": ["SPOT"],
+                "balances": [{"asset": "USDT", "free": "500", "locked": "0"}, {"asset": "AAA", "free": "100", "locked": "0"},
+                             {"asset": "BBB", "free": "50", "locked": "0"}, {"asset": "NOPAIR", "free": "3", "locked": "0"}]}
+
+    @app.get("/api/v3/myTrades")
+    def my_trades(request: Request, symbol: str):
+        check_signed(request)
+        def t(i, buyer, price, qty):
+            return {"id": i, "isBuyer": buyer, "price": str(price), "qty": str(qty), "quoteQty": str(price * qty), "commission": "0", "commissionAsset": "USDT", "time": 1_700_000_000_000 + i}
+        if symbol == "AAAUSDT":
+            return [t(1, True, 38, 60), t(2, True, 43, 40)]  # miktar 100 = bakiye, ort. maliyet 40
+        if symbol == "BBBUSDT":
+            return [t(1, True, 20, 20)]  # miktar 20 != bakiye 50 => geçmiş eksik
+        return []
 
     return app

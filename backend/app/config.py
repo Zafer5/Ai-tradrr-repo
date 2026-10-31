@@ -35,6 +35,10 @@ class AppConfig(BaseSettings):
     session_hours: int = 12
     cookie_secure: bool = False  # HTTPS arkasında true yapın
 
+    # Telegram bildirimi (isteğe bağlı): @BotFather'dan token, kendi chat id'niz
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+
     frontend_dist: Path = Path("../frontend/dist")
     log_level: str = "INFO"
     enable_bot_runtime: bool = True  # testlerde kapatılır

@@ -177,7 +177,8 @@ def simulate(
                     pnl_pct = (eq_now - day_start["eq"]) / day_start["eq"] * 100
                     cool = {"X"} if (t_i - last_exit_ms) < s.cooldown_minutes * 60_000 else set()
                     acct = AccountSnapshot(eq_now, cash, {}, pnl_pct, trades_today["n"], cool, set())
-                    req = EntryRequest("X", comp.score, comp.risk, True, assumed_spread_pct, o_next * (1 + slip), stop, tp1, tp2)
+                    req = EntryRequest(symbol="X", score=comp.score, risk_level=comp.risk, eligible=True, spread_pct=assumed_spread_pct,
+                                      entry=o_next * (1 + slip), stop=stop, tp1=tp1, tp2=tp2)
                     dec = evaluate_entry(req, acct, SystemFlags(), s)
                     if dec.approved:
                         fill = o_next * (1 + slip)

@@ -50,7 +50,7 @@ async def test_scanner_and_analyses_endpoints(authed):
     assert by["AAAUSDT"]["score"] > by["BBBUSDT"]["score"]
     assert by["BBBUSDT"]["score"] <= 55
     one = (await authed.api.get("/api/analyses/aaausdt")).json()
-    assert one["symbol"] == "AAAUSDT" and set(one["tf"]) == {"5m", "15m", "1h", "4h"}
+    assert one["symbol"] == "AAAUSDT" and set(one["tf"]) == {"5m", "15m", "1h", "4h", "1d"}
 
 
 # ----------------------------------------------------------------------- paper alım-satım

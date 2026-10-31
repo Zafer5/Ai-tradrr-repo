@@ -8,12 +8,14 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Callable
 from pathlib import Path
 
 import httpx
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 
+from .api.portfolio import router as portfolio_router
 from .api.routes import router
 from .config import AppConfig, get_config, resolve_secret_key
 from .db import Database
@@ -21,6 +23,8 @@ from .exchange.binance import BinanceClient
 from .exchange.stream import PriceFeed
 from .logging_setup import DBLogHandler, setup_logging
 from .security import AuthState, PasswordGate
+from .notify import Notifier
+from .portfolio.service import PortfolioService
 from .trading.bot import BotRunner
 from .trading.service import TradingService
 from .trading_settings import SettingsStore
@@ -39,6 +43,9 @@ class AppContext:
     service: TradingService
     bot: BotRunner
     log_handler: DBLogHandler
+    notifier: Notifier
+    portfolio: PortfolioService
+    make_client: Callable[..., BinanceClient]
 
 
 def create_app(cfg: AppConfig | None = None, http: httpx.AsyncClient | None = None) -> FastAPI:
@@ -56,8 +63,11 @@ def create_app(cfg: AppConfig | None = None, http: httpx.AsyncClient | None = No
         client = BinanceClient(cfg.binance_rest_url, http=http)
         feed = PriceFeed(cfg.binance_ws_url, client)
         service = TradingService(db, store)
-        bot = BotRunner(db, store, client, feed, service)
-        app.state.ctx = AppContext(cfg, db, auth, store, client, feed, service, bot, handler)
+        notifier = Notifier(db, cfg.telegram_bot_token, cfg.telegram_chat_id)
+        portfolio = PortfolioService(db, notifier)
+        bot = BotRunner(db, store, client, feed, service, notifier, portfolio)
+        make_client = lambda key=None, secret=None, base=None: BinanceClient(base or cfg.binance_rest_url, key, secret, http=http)  # noqa: E731
+        app.state.ctx = AppContext(cfg, db, auth, store, client, feed, service, bot, handler, notifier, portfolio, make_client)
         writer = asyncio.create_task(handler.run_writer(db), name="log-writer")
         if cfg.enable_bot_runtime:
             await bot.start()
@@ -77,6 +87,7 @@ def create_app(cfg: AppConfig | None = None, http: httpx.AsyncClient | None = No
 
     app = FastAPI(title="AI KRİPTO TRADER", version="0.1.0", lifespan=lifespan, docs_url="/api/docs", openapi_url="/api/openapi.json")
     app.include_router(router)
+    app.include_router(portfolio_router)
 
     @app.exception_handler(Exception)
     async def unhandled(_, exc: Exception):

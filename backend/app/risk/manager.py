@@ -31,6 +31,8 @@ class AccountSnapshot:
 class SystemFlags:
     emergency_stop: bool = False
     safe_mode_reason: str | None = None  # API hatası / belirsiz durum => yeni emir yok
+    market_shock_reason: str | None = None  # BTC ani düşüş koruması
+    extra_threshold: float = 0.0  # zayıf piyasada alım puan eşiğine eklenir
 
 
 @dataclass
@@ -40,10 +42,11 @@ class EntryRequest:
     risk_level: str
     eligible: bool
     spread_pct: float | None
-    entry: float  # tahmini dolum fiyatı (ask + kayma)
-    stop: float
-    tp1: float
-    tp2: float
+    change_pct: float | None = None  # 24s değişim (kovalama kontrolü)
+    entry: float = 0.0  # tahmini dolum fiyatı (ask + kayma)
+    stop: float = 0.0
+    tp1: float = 0.0
+    tp2: float = 0.0
 
 
 @dataclass
@@ -78,11 +81,18 @@ def evaluate_entry(req: EntryRequest, acct: AccountSnapshot, flags: SystemFlags,
     if flags.safe_mode_reason:
         reasons.append(f"Güvenli mod: {flags.safe_mode_reason}")
 
+    if flags.market_shock_reason:
+        reasons.append(f"Ani düşüş koruması: {flags.market_shock_reason}")
+
     # ---- AI çıktısı kalite kapısı ----
     if not req.eligible:
         reasons.append("Analiz uygun değil")
-    if req.score < s.buy_score_threshold:
-        reasons.append(f"AI puanı {req.score:.0f} < eşik {s.buy_score_threshold:.0f}")
+    threshold = s.buy_score_threshold + flags.extra_threshold
+    if req.score < threshold:
+        extra = f" (zayıf piyasa nedeniyle +{flags.extra_threshold:.0f})" if flags.extra_threshold else ""
+        reasons.append(f"AI puanı {req.score:.0f} < eşik {threshold:.0f}{extra}")
+    if req.change_pct is not None and req.change_pct > s.max_chase_change_pct:
+        reasons.append(f"Coin 24 saatte %{req.change_pct:.1f} yükselmiş (sınır %{s.max_chase_change_pct:.0f}): peşinden koşulmaz, geri çekilme beklenir")
     if req.risk_level == "Yüksek" and not s.allow_high_risk:
         reasons.append("Risk seviyesi yüksek")
     if req.spread_pct is None or req.spread_pct > s.max_spread_pct:

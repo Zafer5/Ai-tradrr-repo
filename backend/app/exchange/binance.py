@@ -185,6 +185,10 @@ class BinanceClient:
     async def account(self) -> dict:
         return await self._request("GET", "/api/v3/account", signed=True)
 
+    async def my_trades(self, symbol: str, limit: int = 1000) -> list:
+        """Geçmiş dolumlar (salt okunur yetki yeterli)."""
+        return await self._request("GET", "/api/v3/myTrades", {"symbol": symbol, "limit": limit}, signed=True)
+
     async def new_order(self, symbol: str, side: str, order_type: str, quantity: float, price: float | None = None, client_order_id: str | None = None) -> dict:
         p: dict = {"symbol": symbol, "side": side, "type": order_type, "quantity": f"{quantity:.8f}".rstrip("0").rstrip(".")}
         if order_type == "LIMIT":

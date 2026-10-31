@@ -14,12 +14,12 @@ import numpy as np
 from ..exchange.types import Candles
 from .indicators import IndicatorSet, compute_indicators, support_resistance
 
-TIMEFRAMES = ("5m", "15m", "1h", "4h")
-TF_WEIGHTS = {"5m": 0.15, "15m": 0.25, "1h": 0.30, "4h": 0.30}
-TF_LABEL = {"5m": "5dk", "15m": "15dk", "1h": "1sa", "4h": "4sa"}
+TIMEFRAMES = ("5m", "15m", "1h", "4h", "1d")
+TF_WEIGHTS = {"5m": 0.10, "15m": 0.20, "1h": 0.25, "4h": 0.25, "1d": 0.20}
+TF_LABEL = {"5m": "5dk", "15m": "15dk", "1h": "1sa", "4h": "4sa", "1d": "1g"}
 MIN_4H_BARS = 200  # ~33 gün: daha yeni listelenen coinler elenir
 MIN_BARS = 60
-VOL_LIMIT_PCT = {"5m": 1.5, "15m": 2.5, "1h": 4.0, "4h": 7.0}  # ATR/fiyat % üstü => aşırı oynak
+VOL_LIMIT_PCT = {"5m": 1.5, "15m": 2.5, "1h": 4.0, "4h": 7.0, "1d": 14.0}  # ATR/fiyat % üstü => aşırı oynak
 
 
 def label_for(score: float) -> str:
@@ -183,7 +183,7 @@ def compose(signals: dict[str, TFSignal], spread_pct: float | None = None) -> Co
     """Zaman dilimi puanlarını birleştirir. Üst zaman dilimi düşüşteyse puan tavanlanır."""
     wsum = sum(TF_WEIGHTS[tf] for tf in signals)
     base = sum(TF_WEIGHTS[tf] * s.score for tf, s in signals.items()) / wsum
-    s5, s15, s1h, s4h = (signals.get(k) for k in TIMEFRAMES)
+    s5, s15, s1h, s4h, s1d = (signals.get(k) for k in TIMEFRAMES)
     warnings: list[str] = []
     for s in signals.values():
         warnings += s.flags
@@ -197,6 +197,9 @@ def compose(signals: dict[str, TFSignal], spread_pct: float | None = None) -> Co
     if s1h and s1h.trend == "Düşüş":
         warnings.append("1sa grafik düşüş trendinde: puan en fazla 60 olabilir")
         score = min(score, 60)
+    if s1d and s1d.trend == "Düşüş":
+        warnings.append("Günlük grafik düşüş trendinde: puan en fazla 65 olabilir")
+        score = min(score, 65)
     if s1h and s1h.rsi > 75:
         score -= 8
     score = float(np.clip(score, 0, 100))
@@ -226,7 +229,7 @@ def compose(signals: dict[str, TFSignal], spread_pct: float | None = None) -> Co
 
     # Türkçe gerekçe
     why: list[str] = [f"Genel trend: {trend}."]
-    for tf in ("4h", "1h", "15m"):
+    for tf in ("1d", "4h", "1h", "15m"):
         s = signals.get(tf)
         if s:
             macd_txt = ("pozitif" if s.macd_hist > 0 else "negatif") + (" ve güçleniyor" if s.macd_rising else " ve zayıflıyor")
@@ -289,12 +292,76 @@ class Analysis:
     rationale: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     tf: dict[str, dict] = field(default_factory=dict)
+    change_pct: float | None = None
+    tags: list[str] = field(default_factory=list)
+    sell_fit: float = 0.0  # satış uygunluğu 0-100
+    downside_risk: float = 0.0  # düşüş riski 0-100
+    expected_rr: float = 0.0  # brüt beklenen risk/getiri (1. hedef)
+    held: bool = False
 
     def to_dict(self) -> dict:
         d = self.__dict__.copy()
         for k in ("price", "entry", "stop", "tp1", "tp2"):
             d[k] = float(f"{d[k]:.8g}")
         return d
+
+
+CHASE_CHANGE_PCT = 15.0
+
+
+def sell_fitness(signals: dict[str, TFSignal]) -> float:
+    """Satış uygunluğu (0-100): aşırı alım, zayıflayan momentum, bozulan trend."""
+    s1h, s4h = signals.get("1h"), signals.get("4h")
+    if not s1h:
+        return 0.0
+    v = (1 - s1h.trend_ratio) * 40 + max(0.0, s1h.rsi - 65) * 2.5
+    if s1h.macd_hist < 0 and not s1h.macd_rising:
+        v += 15
+    if s1h.bb_pct is not None and s1h.bb_pct > 1:
+        v += 10
+    if s4h and s4h.trend == "Düşüş":
+        v += 10
+    return float(np.clip(v, 0, 100))
+
+
+def downside_risk(signals: dict[str, TFSignal]) -> float:
+    """Düşüşün devam etme riski (0-100)."""
+    v = 0.0
+    weights = {"1d": 20, "4h": 25, "1h": 20}
+    for tf, w in weights.items():
+        s = signals.get(tf)
+        if s:
+            v += w * (1 - s.trend_ratio)
+    if any(s.spike == "down" for s in signals.values()):
+        v += 20
+    s1h = signals.get("1h")
+    if s1h and s1h.macd_hist < 0 and not s1h.macd_rising:
+        v += 10
+    return float(np.clip(v, 0, 100))
+
+
+def classify(signals: dict[str, TFSignal], change_pct: float | None) -> list[str]:
+    """Fırsat etiketleri (tarayıcı kategorileri)."""
+    tags: list[str] = []
+    s15, s1h, s4h = signals.get("15m"), signals.get("1h"), signals.get("4h")
+    if change_pct is not None:
+        if change_pct >= 5:
+            tags.append("Günün yükseleni")
+        if change_pct <= -5:
+            tags.append("Günün düşeni")
+        if change_pct >= CHASE_CHANGE_PCT:
+            tags.append("Aşırı yükselmiş")
+    if (s1h and s1h.vol_ratio and s1h.vol_ratio >= 2.0) or (s15 and s15.vol_ratio and s15.vol_ratio >= 2.5):
+        tags.append("Hacim artışı")
+    if s1h and s15 and s1h.rsi < 48 and s15.macd_rising and s15.macd_hist > 0 and not (s4h and s4h.trend == "Düşüş"):
+        tags.append("Toparlanma")
+    if s1h and s1h.support and (s1h.close - s1h.support) / s1h.atr <= 1.0:
+        tags.append("Desteğe yakın")
+    if s1h and s15 and s4h and _is_up(s15) and _is_up(s1h) and s4h.trend in ("Yatay", "Zayıf yükseliş") and (s15.vol_ratio or 0) >= 1.3:
+        tags.append("Yeni trend")
+    if s1h and (s1h.rsi > 75 or (s1h.bb_pct is not None and s1h.bb_pct > 1)) and "Aşırı yükselmiş" not in tags:
+        tags.append("Aşırı yükselmiş")
+    return tags
 
 
 def analyze_symbol(
@@ -304,10 +371,11 @@ def analyze_symbol(
     plan: PlanParams | None = None,
     spread_pct: float | None = None,
     quote_volume: float | None = None,
+    change_pct: float | None = None,
 ) -> Analysis:
     now_ms = now_ms or int(time.time() * 1000)
     plan = plan or PlanParams()
-    base = Analysis(symbol=symbol, ts=time.time(), eligible=False, spread_pct=spread_pct, quote_volume=quote_volume)
+    base = Analysis(symbol=symbol, ts=time.time(), eligible=False, spread_pct=spread_pct, quote_volume=quote_volume, change_pct=change_pct)
     closed = {tf: c.closed(now_ms) for tf, c in candles.items()}
 
     if len(closed.get("4h", [])) < MIN_4H_BARS:
@@ -334,5 +402,11 @@ def analyze_symbol(
     base.score, base.label, base.trend, base.risk = comp.score, comp.label, comp.trend, comp.risk
     base.atr_pct = signals["1h"].atr_pct
     base.rationale, base.warnings = comp.rationale, comp.warnings
+    base.tags = classify(signals, change_pct)
+    base.sell_fit = round(sell_fitness(signals), 1)
+    base.downside_risk = round(downside_risk(signals), 1)
+    base.expected_rr = round((tp1 - price) / (price - stop), 2) if price > stop else 0.0
+    if "Aşırı yükselmiş" in base.tags:
+        base.warnings.append("Aşırı yükselmiş: yükselişin peşinden koşulmaz, geri çekilme beklenir")
     base.tf = {tf: s.to_dict() for tf, s in signals.items()}
     return base
