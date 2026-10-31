@@ -1,0 +1,17 @@
+services:
+  trader:
+    build: ./backend
+    container_name: ai-kripto-trader
+    env_file: .env
+    environment:
+      DATABASE_URL: sqlite+aiosqlite:////app/data/trader.db
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

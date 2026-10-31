@@ -1,0 +1,10 @@
+{
+  "name": "AI Kripto Trader",
+  "short_name": "Kripto Trader",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f1419",
+  "theme_color": "#0f1419",
+  "lang": "tr",
+  "icons": [{"src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml"}]
+}
