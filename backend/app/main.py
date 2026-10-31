@@ -17,6 +17,7 @@ from .config import settings
 from .db import AnalysisRecord, Database, LogEntry, Position, Trade
 from .engine import Engine
 from .exchanges.binance import BinanceClient, BinancePriceStream
+from .secrets_store import KeyStore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 STATIC = Path(__file__).parent / "static"
@@ -143,6 +144,51 @@ async def put_settings(data: dict):
     return eng().settings.to_dict()
 
 
+def keystore() -> KeyStore:
+    import os
+    path = settings.database_url.split(":///", 1)[-1]
+    return KeyStore(os.path.dirname(os.path.abspath(path)) or ".", settings.panel_password)
+
+
+class KeyBody(BaseModel):
+    environment: str = "testnet"
+    api_key: str
+    api_secret: str
+
+
+@app.get("/api/keys", dependencies=[Depends(auth)])
+async def get_keys():
+    return keystore().public_info()
+
+
+@app.put("/api/keys", dependencies=[Depends(auth)])
+async def put_keys(b: KeyBody):
+    if b.environment != "testnet":
+        raise HTTPException(400, "Bu sürümde yalnızca Binance Testnet anahtarı kaydedilebilir. Gerçek hesap anahtarı kabul edilmez.")
+    k, sec = b.api_key.strip(), b.api_secret.strip()
+    if not (16 <= len(k) <= 128) or not (16 <= len(sec) <= 128) or " " in k or " " in sec:
+        raise HTTPException(400, "Anahtar veya secret geçersiz görünüyor. Kopyalarken boşluk kalmış olabilir.")
+    keystore().save(b.environment, k, sec)
+    await eng().log("INFO", "Testnet API anahtarı kaydedildi (şifreli). Değer günlüğe yazılmadı.")
+    return keystore().public_info()
+
+
+@app.delete("/api/keys", dependencies=[Depends(auth)])
+async def delete_keys():
+    keystore().delete()
+    await eng().log("INFO", "Kayıtlı API anahtarı silindi")
+    return {"configured": False}
+
+
+@app.get("/api/activity", dependencies=[Depends(auth)])
+async def activity(limit: int = 100):
+    e = eng()
+    import time as _t
+    nxt = max(0, int(e.last_analysis_at + e.settings.trade.analysis_interval_sec - _t.time())) if e.last_analysis_at else None
+    return {"progress": e.progress, "next_analysis_in": nxt, "running": e.running, "min_score": e.settings.risk.min_score,
+            "tracked": len(e.universe), "items": list(e.decisions)[:limit]}
+
+
 @app.get("/api/connections", dependencies=[Depends(auth)])
 async def connections():
     e = eng()
@@ -151,8 +197,9 @@ async def connections():
         "mode": "paper",
         "market_data": "Herkese açık piyasa verisi (API anahtarı gerekmez)",
         "websocket_connected": bool(e.stream and e.stream.connected),
-        "api_key_configured": False,
+        "api_key_configured": keystore().exists(),
         "live_trading": "Kapalı - bu sürümde gerçek emir gönderme kodu yoktur",
+        "key_note": "Kayıtlı anahtar şimdilik kullanılmıyor; Testnet entegrasyonu bir sonraki aşamada.",
     }
 
 

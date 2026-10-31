@@ -54,3 +54,24 @@ def test_live_mode_refused(monkeypatch):
     monkeypatch.setattr(settings, "panel_password", "test-sifre-123")
     with pytest.raises(RuntimeError):
         settings.validate_safety()
+
+
+def test_keys_testnet_only_and_never_returned(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "database_url", f"sqlite+aiosqlite:///{tmp_path}/t.db")
+    key, sec = "A" * 40, "SECRET" + "B" * 40
+    assert client.get("/api/keys", headers=h()).json() == {"configured": False}
+    assert client.put("/api/keys", headers=h(), json={"environment": "live", "api_key": key, "api_secret": sec}).status_code == 400
+    assert client.put("/api/keys", headers=h(), json={"environment": "testnet", "api_key": "kisa", "api_secret": sec}).status_code == 400
+    r = client.put("/api/keys", headers=h(), json={"environment": "testnet", "api_key": key, "api_secret": sec})
+    assert r.status_code == 200 and r.json()["api_key_masked"] == "AAAA…AAAA"
+    assert sec not in r.text and sec not in client.get("/api/keys", headers=h()).text
+    assert sec not in client.get("/api/logs", headers=h()).text
+    raw = (tmp_path / "api_keys.enc").read_bytes()
+    assert sec.encode() not in raw and key.encode() not in raw       # diskte şifreli
+    assert client.get("/api/connections", headers=h()).json()["api_key_configured"] is True
+    assert client.delete("/api/keys", headers=h()).json() == {"configured": False}
+
+
+def test_activity_feed(client):
+    d = client.get("/api/activity", headers=h()).json()
+    assert d["running"] is False and d["items"] == [] and "min_score" in d

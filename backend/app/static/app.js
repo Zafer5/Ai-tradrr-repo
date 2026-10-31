@@ -1,6 +1,6 @@
 "use strict";
 const TABS = [
-  ["home", "Ana Sayfa"], ["scanner", "Tarayıcı"], ["ai", "Analizler"], ["positions", "Pozisyonlar"],
+  ["home", "Ana Sayfa"], ["live", "Canlı"], ["scanner", "Tarayıcı"], ["ai", "Analizler"], ["positions", "Pozisyonlar"],
   ["history", "Geçmiş"], ["report", "Kâr-Zarar"], ["settings", "Bot Ayarları"], ["risk", "Risk"],
   ["api", "Bağlantılar"], ["logs", "Günlükler"],
 ];
@@ -69,6 +69,19 @@ V.home = async () => {
   <div class="card">${s.top_opportunities.length ? s.top_opportunities.map(o =>
     `<div class="row"><b>${esc(o.symbol)}</b><span>${esc(o.label)} <span class="score ${scoreCls(o.score)}">${o.score}</span></span></div>`).join("")
     : `<div class="small">Henüz analiz yok. İlk analiz birkaç dakika sürebilir.</div>`}</div>`;
+};
+
+V.live = async () => {
+  const d = await api("/api/activity");
+  const p = d.progress;
+  const status = !d.running ? `<div class="notice">Bot <b>kapalı</b>. Analiz yapılır ama alım yapılmaz. Başlatmak için Ana Sayfa'ya git.</div>` : "";
+  const prog = p.active ? `Analiz sürüyor: ${p.done}/${p.total} coin` : d.next_analysis_in == null ? "İlk analiz bekleniyor (bot başladıktan ~1-2 dk sonra)" : `Sonraki analiz ${d.next_analysis_in} sn sonra`;
+  const cls = {alım: "pos", satış: "pos", red: "neg", bekle: "", bilgi: ""};
+  const icon = {alım: "🟢 ALIM", satış: "🔴 SATIŞ", red: "⛔ ALINMADI", bekle: "⏸ BEKLE", bilgi: "ℹ"};
+  const t = x => new Date(x * 1000).toLocaleTimeString("tr-TR");
+  return `${status}<div class="card"><div class="row"><span>${prog}</span><span class="small">Takipte ${d.tracked} coin · alım eşiği ${d.min_score} puan</span></div></div>
+  <div class="card">${d.items.map(i => `<div class="row"><div><b class="${cls[i.action] || ""}">${icon[i.action] || ""}</b> ${i.symbol !== "-" ? "<b>" + esc(i.symbol) + "</b>" : ""}${i.score != null ? ` <span class="score ${scoreCls(i.score)}">${i.score}</span>` : ""}
+    <div class="small">${esc(i.text)}</div></div><span class="small">${t(i.at)}</span></div>`).join("") || "Henüz kayıt yok. Botu başlatınca burada kararlarını göreceksin."}</div>`;
 };
 
 V.scanner = async () => {
@@ -149,11 +162,24 @@ V.settings = () => form("settings");
 V.risk = () => form("risk");
 
 V.api = async () => {
-  const c = await api("/api/connections");
-  const row = (k, v) => `<div class="row"><span>${k}</span><b style="text-align:right">${esc(v)}</b></div>`;
+  const [c, k] = await Promise.all([api("/api/connections"), api("/api/keys")]);
+  const row = (a, v) => `<div class="row"><span>${a}</span><b style="text-align:right">${esc(v)}</b></div>`;
+  const saved = k.configured
+    ? (k.readable ? `<div class="notice" style="border-color:var(--green)">Kayıtlı Testnet anahtarı: <b>${esc(k.api_key_masked)}</b><br>Secret şifreli saklanıyor ve bir daha gösterilmez.</div>
+       <button class="btn grey" onclick="delKey()">Kayıtlı anahtarı sil</button>`
+      : `<div class="notice">${esc(k.note)}</div><button class="btn grey" onclick="delKey()">Kayıtlı anahtarı sil</button>`)
+    : "";
   return `<div class="card">${row("Borsa", c.exchange)}${row("Mod", "Paper Trading (sanal)")}${row("Piyasa verisi", c.market_data)}
     ${row("Canlı fiyat akışı", c.websocket_connected ? "Bağlı" : "Bağlı değil")}${row("Gerçek işlem", c.live_trading)}</div>
-    <div class="notice">Bu aşamada API anahtarı gerekmez. API anahtarları hiçbir zaman bu panele veya sohbete yazılmaz; ileride yalnızca sunucudaki .env dosyasına eklenecek.</div>`;
+  <h2>Binance Testnet API anahtarı</h2>
+  <div class="card">
+    <div class="notice">Sanal (paper) işlem için anahtar <b>gerekmez</b>. Bu form bir sonraki aşama olan Binance Testnet içindir. Anahtar şimdilik kaydedilir ama bot onu kullanmaz.<br>
+    Yalnızca <b>testnet.binance.vision</b> adresinden aldığın anahtarı gir. <b>Gerçek hesap anahtarı girme</b> (kabul edilmez). Para çekme izni olmamalı.</div>
+    ${saved}
+    <label>API Key</label><input type="password" id="ak" autocomplete="off" style="width:100%;padding:10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--text)">
+    <label>Secret Key</label><input type="password" id="as" autocomplete="off" style="width:100%;padding:10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--text)">
+    <button class="btn" onclick="saveKey()">Şifreli kaydet</button>
+  </div>`;
 };
 
 V.logs = async () => {
@@ -165,7 +191,7 @@ async function load() {
   clearTimeout(timer);
   try { $("#view").innerHTML = await V[tab](); if (tab !== "home") updateBadge(); }
   catch (e) { $("#view").innerHTML = `<div class="card neg">${esc(e.message)}</div>`; }
-  if (!["settings", "risk"].includes(tab)) timer = setTimeout(load, 10000);
+  if (!["settings", "risk", "api"].includes(tab)) timer = setTimeout(load, tab === "live" ? 5000 : 10000);
 }
 
 async function act(path, body) {
@@ -189,6 +215,18 @@ async function saveSettings() {
   });
   try { await api("/api/settings", {method: "PUT", body: JSON.stringify(data)}); alert("Kaydedildi"); }
   catch (e) { alert("Kaydedilemedi: " + e.message); }
+}
+
+async function saveKey() {
+  const body = {environment: "testnet", api_key: $("#ak").value, api_secret: $("#as").value};
+  try { await api("/api/keys", {method: "PUT", body: JSON.stringify(body)}); $("#ak").value = $("#as").value = ""; alert("Kaydedildi (şifreli)."); }
+  catch (e) { alert("Kaydedilemedi: " + e.message); return; }
+  load();
+}
+async function delKey() {
+  if (!confirm("Kayıtlı anahtar silinsin mi?")) return;
+  try { await api("/api/keys", {method: "DELETE"}); } catch (e) { alert(e.message); }
+  load();
 }
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});

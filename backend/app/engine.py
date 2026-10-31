@@ -6,6 +6,7 @@ import datetime as dt
 import logging
 import math
 import time
+from collections import deque
 from dataclasses import asdict, dataclass, field, fields
 
 from sqlalchemy import delete, func, select
@@ -96,6 +97,8 @@ class Engine:
         self.last_universe_at = 0.0
         self.last_analysis_at = 0.0
         self.last_error: str | None = None
+        self.decisions: deque = deque(maxlen=300)
+        self.progress = {"done": 0, "total": 0, "active": False}
         self._lock = asyncio.Lock()
         self._tasks: list[asyncio.Task] = []
 
@@ -105,6 +108,10 @@ class Engine:
         async with self.db.session() as s:
             s.add(LogEntry(level=level.upper(), message=msg))
             await s.commit()
+
+    def note(self, symbol: str, score: int | None, action: str, text: str) -> None:
+        """Panelin 'Canlı' sekmesinde görünen karar kaydı."""
+        self.decisions.appendleft({"at": time.time(), "symbol": symbol, "score": score, "action": action, "text": text})
 
     # ---------- başlangıç ----------
     async def init(self) -> None:
@@ -218,14 +225,22 @@ class Engine:
         if not self.universe:
             return
         analyses: list[Analysis] = []
-        for u in list(self.universe):
-            try:
-                a = await self.analyze_symbol(u.symbol)
-            except ExchangeError as e:
-                await self.log("WARNING", f"{u.symbol} analiz edilemedi: {e}")
-                continue
-            self.latest[u.symbol] = a
-            analyses.append(a)
+        coins = list(self.universe)
+        self.progress = {"done": 0, "total": len(coins), "active": True}
+        self.note("-", None, "bilgi", f"Analiz başladı: {len(coins)} coin incelenecek")
+        try:
+            for u in coins:
+                try:
+                    a = await self.analyze_symbol(u.symbol)
+                except ExchangeError as e:
+                    await self.log("WARNING", f"{u.symbol} analiz edilemedi: {e}")
+                    self.progress["done"] += 1
+                    continue
+                self.latest[u.symbol] = a
+                analyses.append(a)
+                self.progress["done"] += 1
+        finally:
+            self.progress["active"] = False
         self.last_analysis_at = time.time()
         async with self.db.session() as s:
             for a in analyses:
@@ -234,11 +249,23 @@ class Engine:
             await s.execute(delete(AnalysisRecord).where(AnalysisRecord.created_at < cutoff))
             await s.execute(delete(LogEntry).where(LogEntry.created_at < utcnow() - dt.timedelta(days=14)))
             await s.commit()
-        candidates = sorted((a for a in analyses if a.score >= self.settings.risk.min_score), key=lambda a: a.score, reverse=True)
+        min_score = self.settings.risk.min_score
+        candidates = sorted((a for a in analyses if a.score >= min_score), key=lambda a: a.score, reverse=True)
+        best = max(analyses, key=lambda a: a.score, default=None)
+        summary = f"Analiz bitti: {len(analyses)} coin, {len(candidates)} aday (eşik {min_score} puan)."
+        if best:
+            summary += f" En yüksek puan: {best.symbol} = {best.score}."
+        if not candidates:
+            summary += " Eşiği geçen coin yok, bu yüzden alım yapılmadı."
+        self.note("-", None, "bilgi", summary)
         await self.log("INFO", f"Analiz tamamlandı: {len(analyses)} coin, {len(candidates)} aday")
-        if self.running and not self.emergency_stop:
-            for a in candidates:
-                await self.try_open(a)
+        if not candidates:
+            return
+        if not self.running or self.emergency_stop:
+            self.note("-", None, "bekle", "Bot kapalı olduğu için adaylara girilmedi. Başlatmak için Ana Sayfa'dan 'Botu başlat'a bas.")
+            return
+        for a in candidates:
+            await self.try_open(a)
 
     # ---------- portföy ----------
     async def portfolio(self, s) -> tuple[Account, list[Position], PortfolioState]:
@@ -264,6 +291,7 @@ class Engine:
                 book = await self.client.book_ticker(a.symbol)
             except ExchangeError as e:
                 await self.log("WARNING", f"{a.symbol}: güncel alış fiyatı alınamadı, işlem yapılmadı ({e})")
+                self.note(a.symbol, a.score, "red", "Güncel fiyat alınamadı, işlem yapılmadı")
                 return
             async with self.db.session() as s:
                 acc, _, state = await self.portfolio(s)
@@ -271,6 +299,7 @@ class Engine:
                 if not d.approved:
                     await s.commit()
                     await self.log("INFO", f"{a.symbol} (puan {a.score}) alınmadı: {'; '.join(d.reasons)}")
+                    self.note(a.symbol, a.score, "red", "Risk kontrolü onaylamadı: " + "; ".join(d.reasons))
                     return
                 try:
                     fill = self.executor.market_buy(book.ask, d.quantity)
@@ -292,6 +321,7 @@ class Engine:
                             quantity=fill.quantity, notional=fill.notional, fee=fill.fee, note=f"Puan {a.score}"))
                 await s.commit()
             await self._update_stream()
+            self.note(a.symbol, a.score, "alım", f"SANAL ALIM: {fill.quantity:g} adet @ {fill.price:.6g} ({fill.notional:.2f} USDT). Hedef {a.take_profit:.6g}, stop {a.stop_loss:.6g}. Gerekçe: {why}")
             await self.log("INFO", f"SANAL ALIM {a.symbol}: {fill.quantity:g} adet @ {fill.price:.6g} "
                                    f"({fill.notional:.2f} USDT), hedef {a.take_profit:.6g}, stop {a.stop_loss:.6g}")
 
@@ -313,6 +343,7 @@ class Engine:
             pos.quantity, pos.status, pos.closed_at, pos.exit_reason = 0.0, "closed", utcnow(), reason
         s.add(Trade(position_id=pos.id, symbol=pos.symbol, side="SELL", mode="paper", price=fill.price, quantity=qty,
                     notional=fill.notional, fee=fill.fee, pnl=pnl, note=reason))
+        self.note(pos.symbol, None, "satış", f"SANAL SATIŞ: {qty:g} adet @ {fill.price:.6g} ({reason}), net {pnl:+.2f} USDT")
         await self.log("INFO", f"SANAL SATIŞ {pos.symbol}: {qty:g} @ {fill.price:.6g} ({reason}), net {pnl:+.2f} USDT")
         return pnl
 

@@ -11,8 +11,8 @@ if not exist .env (
 if not exist .venv (
   echo Ilk kurulum yapiliyor, birkac dakika surebilir...
   python -m venv .venv || (echo Python bulunamadi. python.org adresinden kurun ve "Add to PATH" kutusunu isaretleyin. & pause & exit /b 1)
-  .venv\Scripts\pip install -r backend\requirements.txt || (echo Kurulum hatasi & pause & exit /b 1)
 )
+.venv\Scripts\pip install -q -r backend\requirements.txt || (echo Kurulum hatasi & pause & exit /b 1)
 echo.
 echo Panel: http://localhost:8000   (kapatmak icin bu pencereyi kapatin)
 start "" http://localhost:8000

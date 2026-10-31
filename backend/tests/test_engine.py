@@ -108,3 +108,18 @@ async def test_settings_validation(engine):
         await engine.save_settings({"risk": {"risk_per_trade_pct": 50}})
     await engine.save_settings({"risk": {"max_open_positions": 3}})
     assert engine.settings.risk.max_open_positions == 3
+
+
+async def test_decision_feed_explains_actions(engine):
+    e = engine
+    await e.analysis_cycle()           # bot kapalı
+    texts = " ".join(i["text"] for i in e.decisions)
+    assert "Analiz bitti" in texts
+    e.settings.risk.min_score = 0
+    await e.analysis_cycle()
+    assert "Bot kapalı" in " ".join(i["text"] for i in e.decisions)
+    await e.set_running(True)
+    await e.analysis_cycle()
+    actions = [i["action"] for i in e.decisions]
+    assert "alım" in actions
+    assert e.progress["active"] is False and e.progress["done"] == e.progress["total"] == 1
