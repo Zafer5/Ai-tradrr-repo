@@ -5,6 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, update
 
+import math
+
+from ..analysis.engine import TIMEFRAMES
+from ..analysis.indicators import compute_indicators
 from ..exchange.binance import ExchangeError
 from ..logging_setup import register_secret
 from ..models import ApiCredential, Notification, PortfolioAction, utcnow
@@ -220,3 +224,40 @@ async def daily_report(request: Request):
 async def regime(request: Request):
     b = ctx(request).bot
     return {"regime": b.regime.to_dict() if b.regime else None, "shock_active": b.shock_active}
+
+
+# ---------------------------------------------------------------------- fiyat grafiği
+def _clean(arr) -> list:
+    return [None if (isinstance(x, float) and (math.isnan(x) or math.isinf(x))) else float(x) for x in arr]
+
+
+@router.get("/market/{symbol}/chart")
+async def chart(symbol: str, request: Request, tf: str = "1h", limit: int = 120):
+    """Mum + EMA/Bollinger verisi ve AI plan seviyeleri (grafik ekranı için). Oluşmakta olan son mum dahildir."""
+    c = ctx(request)
+    sym = symbol.upper()
+    if tf not in TIMEFRAMES:
+        raise HTTPException(422, f"Zaman dilimi şunlardan biri olmalı: {', '.join(TIMEFRAMES)}")
+    if c.bot.symbols and sym not in c.bot.symbols:
+        raise HTTPException(404, "Coin bulunamadı.")
+    try:
+        candles = (await c.bot.get_candles(sym))[tf]
+    except ExchangeError as e:
+        raise HTTPException(502, f"Mum verisi alınamadı: {e}")
+    ind = compute_indicators(candles)
+    n = max(20, min(limit, len(candles), 300))
+    sl = slice(len(candles) - n, None)
+    a = c.bot.analyses.get(sym)
+    levels = {}
+    if a and a.eligible:
+        levels = {"entry": a.entry, "stop": a.stop, "tp1": a.tp1, "tp2": a.tp2}
+        s1h = a.tf.get("1h", {})
+        levels["support"], levels["resistance"] = s1h.get("support"), s1h.get("resistance")
+    return {
+        "symbol": sym, "tf": tf,
+        "t": [int(x) for x in candles.open_time[sl]],
+        "o": _clean(candles.open[sl]), "h": _clean(candles.high[sl]), "l": _clean(candles.low[sl]), "c": _clean(candles.close[sl]),
+        "v": _clean(candles.volume[sl]),
+        "ema21": _clean(ind.ema21[sl]), "ema50": _clean(ind.ema50[sl]), "bb_up": _clean(ind.bb_up[sl]), "bb_low": _clean(ind.bb_low[sl]),
+        "levels": levels,
+    }

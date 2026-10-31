@@ -231,3 +231,15 @@ async def test_regression_manage_mode_does_not_repeat_partial_sales(authed):
     p = (await api.get("/api/portfolio")).json()
     assert all(x["asset"] != "AAA" for x in p["items"])  # tamamen çıkıldı: listeden kalkar
     assert p["actions"][0]["action"] == "TRAIL_EXIT" and p["actions"][0]["net_pnl"] > 0
+
+
+async def test_chart_endpoint_returns_aligned_series_and_levels(authed):
+    env, api = authed, authed.api
+    await scan(env)
+    d = (await api.get("/api/market/aaausdt/chart?tf=1h&limit=100")).json()
+    n = len(d["t"])
+    assert n == 100 and all(len(d[k]) == n for k in ("o", "h", "l", "c", "v", "ema21", "ema50", "bb_up", "bb_low"))
+    assert d["levels"]["stop"] < d["levels"]["entry"] < d["levels"]["tp1"] < d["levels"]["tp2"]
+    assert all(h >= l for h, l in zip(d["h"], d["l"]))
+    assert (await api.get("/api/market/aaausdt/chart?tf=2h")).status_code == 422
+    assert (await api.get("/api/market/nopeusdt/chart")).status_code == 404
