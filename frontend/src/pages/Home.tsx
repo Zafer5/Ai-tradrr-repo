@@ -72,6 +72,7 @@ export default function Home() {
           </div>
         </Card>
 
+        <div className="col" style={{ gap: 16 }}>
         <Card title="En iyi fırsatlar" icon={<Sparkles />} subtitle="AI puanına göre · tek başına emir değildir" actions={<a href="#/analyses" className="btn ghost sm">Tümü <ChevronRight /></a>} flush>
           {d.top_opportunities.length === 0 ? <Empty icon={<Radar size={22} />} title="Analiz bekleniyor">İlk tarama tamamlanınca fırsatlar burada görünür.</Empty> : (
             <ul className="list">
@@ -89,6 +90,16 @@ export default function Home() {
             </ul>
           )}
         </Card>
+        {pf.data && pf.data.items.length > 0 && (
+          <Card title="Mevcut coinlerim" icon={<Wallet />} actions={<a href="#/portfolio" className="btn ghost sm">Detay <ChevronRight /></a>}>
+            <dl className="kv">
+              <dt>Portföy değeri</dt><dd className="num">{usd(pf.data.totals.value)} USDT</dd>
+              <dt>Gerçekleşmemiş K/Z</dt><dd className={`num ${tone(pf.data.totals.unrealized_pnl)}`}>{signed(pf.data.totals.unrealized_pnl)} USDT</dd>
+              <dt>Yönetim modu</dt><dd>{{ off: "Kapalı", watch: "İzle ve öner", manage: "Gölge yönetim" }[pf.data.mode as string]}</dd>
+            </dl>
+          </Card>
+        )}
+        </div>
       </div>
 
       <div className="grid g4">
@@ -128,15 +139,6 @@ export default function Home() {
         </div>
 
         <div className="col" style={{ gap: 16 }}>
-          {pf.data && pf.data.items.length > 0 && (
-            <Card title="Mevcut coinlerim" icon={<Wallet />} actions={<a href="#/portfolio" className="btn ghost sm">Detay <ChevronRight /></a>}>
-              <dl className="kv">
-                <dt>Portföy değeri</dt><dd className="num">{usd(pf.data.totals.value)} USDT</dd>
-                <dt>Gerçekleşmemiş K/Z</dt><dd className={`num ${tone(pf.data.totals.unrealized_pnl)}`}>{signed(pf.data.totals.unrealized_pnl)} USDT</dd>
-                <dt>Yönetim modu</dt><dd>{{ off: "Kapalı", watch: "İzle ve öner", manage: "Gölge yönetim" }[pf.data.mode as string]}</dd>
-              </dl>
-            </Card>
-          )}
           {daily.data && (
             <Card title="Günlük işlem raporu" icon={<Gauge />}><p className="small muted" style={{ whiteSpace: "pre-wrap", lineHeight: 1.7 }}>{daily.data.body}</p></Card>
           )}

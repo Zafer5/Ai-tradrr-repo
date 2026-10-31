@@ -69,7 +69,7 @@ export default function Portfolio() {
         <Card title="Dağılım" icon={<BookOpenCheck />}>
           {items.length === 0 ? <Empty title="Portföy boş" /> : (
             <div className="row" style={{ gap: 20 }}>
-              <Donut parts={parts} center={<div><b className="num" style={{ fontSize: 17 }}>{items.length}</b><div className="xs dim">coin</div></div>} />
+              <Donut parts={parts} center={<div><span className="num bold" style={{ fontSize: 20 }}>{items.length}</span><div className="xs dim">coin</div></div>} />
               <div className="legend grow">{parts.slice(0, 6).map((p) => <div key={p.label}><i style={{ background: p.color }} /><span>{p.label}</span><span>{T.value ? pct((p.v / T.value) * 100, 1) : "-"}</span></div>)}</div>
             </div>
           )}

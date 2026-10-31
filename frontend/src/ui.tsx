@@ -121,7 +121,7 @@ export function ScoreRing({ score, size = 46 }: { score: number | null | undefin
         <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="var(--surface-3)" strokeWidth="4" />
         {has && <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth="4" strokeLinecap="round" strokeDasharray={`${(s / 100) * c} ${c}`} />}
       </svg>
-      <b style={{ fontSize: size * 0.32, color }}>{has ? s.toFixed(0) : "–"}</b>
+      <b className="sc" style={{ fontSize: size * 0.32, color }}>{has ? s.toFixed(0) : "–"}</b>
     </span>
   );
 }

@@ -47,7 +47,7 @@ Chrome'da menü → "Ana ekrana ekle". (Tam PWA kurulumu için HTTPS gerekir: Ta
 ## Geliştirme
 ```bash
 cd backend && python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python -m pytest                       # 99 test
+.venv/bin/python -m pytest                       # 100 test
 ADMIN_PASSWORD=uzun-bir-sifre .venv/bin/uvicorn app.main:create_app --factory --port 8000
 cd frontend && npm install && npm run dev        # http://localhost:5173
 ```

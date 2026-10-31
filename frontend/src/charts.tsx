@@ -64,7 +64,7 @@ export function AreaChart({ points, height = 200, format, baseline }: { points: 
       </svg>
       <span style={{ position: "absolute", left: `${(hi / (n - 1)) * 100}%`, top: `${(calc.y(points[hi].v) / calc.H) * 100}%`, width: 10, height: 10, borderRadius: "50%", background: color, border: "2px solid var(--surface)", transform: "translate(-50%,-50%)", pointerEvents: "none" }} />
       {idx !== null && <div className="tip" style={{ left: `${Math.max(14, Math.min(86, (idx / (n - 1)) * 100))}%` }}><b>{format(points[idx].v)}</b><span>{points[idx].label}</span></div>}
-      <div className="axis"><span>{points[0].label}</span><span>{format(Math.min(...points.map((p) => p.v)))} – {format(Math.max(...points.map((p) => p.v)))}</span><span>{points[n - 1].label}</span></div>
+      <div className="axis"><span>{points[0].label}</span><span className="mid">{format(Math.min(...points.map((p) => p.v)))} – {format(Math.max(...points.map((p) => p.v)))}</span><span>{points[n - 1].label}</span></div>
     </div>
   );
 }
@@ -106,7 +106,7 @@ export function Donut({ parts, size = 150, center }: { parts: { label: string; v
           return el;
         })}
       </svg>
-      {center && <div style={{ position: "absolute", textAlign: "center", transform: "none" }}>{center}</div>}
+      {center && <div className="mid">{center}</div>}
     </div>
   );
 }
@@ -138,7 +138,8 @@ export function CandleChart({ d, height = 330 }: { d: ChartData; height?: number
   const i = idx ?? n - 1;
   const bw = Math.max(1.5, (plotW / n) * 0.66);
   const dt = (ms: number) => new Date(ms).toLocaleString("tr-TR", { timeZone: "Europe/Istanbul", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
-  const gridVals = [0.2, 0.4, 0.6, 0.8].map((f) => calc.lo + (calc.hi - calc.lo) * f);
+  const lvlY = Object.entries(d.levels).filter(([k, v]) => typeof v === "number" && LEVEL_STYLE[k] && v >= calc.lo && v <= calc.hi).map(([, v]) => calc.y(v as number));
+  const gridVals = [0.2, 0.4, 0.6, 0.8].map((f) => calc.lo + (calc.hi - calc.lo) * f).filter((v) => lvlY.every((y) => Math.abs(y - calc.y(v)) > 16));
   return (
     <div>
       <div className="row wrap small mono" style={{ gap: "6px 14px", marginBottom: 8 }}>
