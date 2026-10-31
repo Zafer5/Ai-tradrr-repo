@@ -103,6 +103,8 @@ class BinanceClient:
                 self.last_error = f"Hız sınırı ({resp.status_code}); {retry_after:.0f} sn beklenecek"
                 log.warning(self.last_error)
                 last_exc = ExchangeError(self.last_error, resp.status_code)
+                if method != "GET":
+                    raise last_exc  # emir istekleri otomatik tekrar denenmez
                 continue
             if resp.status_code >= 500:
                 last_exc = ExchangeError(f"Binance sunucu hatası {resp.status_code}", resp.status_code)
@@ -121,6 +123,8 @@ class BinanceClient:
             self.last_ok_at = time.time()
             self.last_error = None
             return resp.json()
+        if isinstance(last_exc, ExchangeError):
+            raise last_exc  # durum kodu (5xx/429) korunur: çağıran 'kesin ret' ile 'belirsiz'i ayırabilsin
         raise ExchangeError(f"İstek başarısız ({path}): {last_exc}")
 
     # ------------------------------------------------------------------ genel uçlar
@@ -189,14 +193,33 @@ class BinanceClient:
         """Geçmiş dolumlar (salt okunur yetki yeterli)."""
         return await self._request("GET", "/api/v3/myTrades", {"symbol": symbol, "limit": limit}, signed=True)
 
-    async def new_order(self, symbol: str, side: str, order_type: str, quantity: float, price: float | None = None, client_order_id: str | None = None) -> dict:
-        p: dict = {"symbol": symbol, "side": side, "type": order_type, "quantity": f"{quantity:.8f}".rstrip("0").rstrip(".")}
+    @staticmethod
+    def _order_params(symbol: str, side: str, order_type: str, quantity: float | str, price: float | str | None, client_order_id: str | None) -> dict:
+        q = quantity if isinstance(quantity, str) else f"{quantity:.8f}".rstrip("0").rstrip(".")
+        p: dict = {"symbol": symbol, "side": side, "type": order_type, "quantity": q}
         if order_type == "LIMIT":
             p["timeInForce"] = "GTC"
-            p["price"] = f"{price:.8f}".rstrip("0").rstrip(".")
+            p["price"] = price if isinstance(price, str) else f"{price:.8f}".rstrip("0").rstrip(".")
         if client_order_id:
             p["newClientOrderId"] = client_order_id
+        return p
+
+    async def new_order(self, symbol: str, side: str, order_type: str, quantity: float | str, price: float | str | None = None, client_order_id: str | None = None) -> dict:
+        """Gerçek emir. FULL yanıt: dolumlar (fills), komisyon ve ortalama fiyat hesaplanabilsin diye. TEKRAR DENENMEZ."""
+        p = self._order_params(symbol, side, order_type, quantity, price, client_order_id)
+        p["newOrderRespType"] = "FULL"
         return await self._request("POST", "/api/v3/order", p, signed=True, retries=1)
+
+    async def test_order(self, symbol: str, side: str, order_type: str, quantity: float | str, price: float | str | None = None) -> dict:
+        """Emri gerçekten göndermeden doğrular (imza, filtreler, miktar kuralları)."""
+        return await self._request("POST", "/api/v3/order/test", self._order_params(symbol, side, order_type, quantity, price, None), signed=True, retries=1)
+
+    async def get_order_by_client_id(self, symbol: str, client_order_id: str) -> dict:
+        return await self._request("GET", "/api/v3/order", {"symbol": symbol, "origClientOrderId": client_order_id}, signed=True, retries=2)
+
+    async def price(self, symbol: str) -> float:
+        d = await self._request("GET", "/api/v3/ticker/price", {"symbol": symbol})
+        return _f(d["price"])
 
     async def get_order(self, symbol: str, order_id: int) -> dict:
         return await self._request("GET", "/api/v3/order", {"symbol": symbol, "orderId": order_id}, signed=True)

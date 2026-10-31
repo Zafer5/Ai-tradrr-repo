@@ -11,9 +11,10 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Bu sürümde gerçek para ile emir gönderme KOD DÜZEYİNDE kapalıdır.
-# Aşama 3 yalnızca kullanıcı ayrıca onay verdikten sonra, bilinçli bir kod değişikliğiyle açılır.
-LIVE_TRADING_AVAILABLE = False
+# Gerçek işlem iki bağımsız kilitle korunur:
+#  1) sunucu: .env içinde ALLOW_LIVE_TRADING=true (varsayılan false)
+#  2) panel: sermaye tavanı + yazılı onay cümlesi + şifre
+# İkisi de sağlanmadan gerçek hesapta emir gönderilmez.
 
 
 class AppConfig(BaseSettings):
@@ -28,6 +29,11 @@ class AppConfig(BaseSettings):
     binance_rest_url: str = "https://api.binance.com"
     binance_ws_url: str = "wss://stream.binance.com:9443/ws"
     binance_testnet_rest_url: str = "https://testnet.binance.vision"
+    # Emir/hesap (imzalı) istekleri için adres. data-api.binance.vision YALNIZCA piyasa verisidir, emir kabul etmez.
+    binance_trade_rest_url: str = "https://api.binance.com"
+
+    # SUNUCU SAHİBİNİN gerçek işlem kilidi. false iken panelden bile gerçek emir açılamaz.
+    allow_live_trading: bool = False
 
     # Panel girişi
     admin_password: str = ""

@@ -12,6 +12,7 @@ import hashlib
 import hmac
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 
 from app.exchange.types import INTERVAL_MS
 from tests.synth import make_candles
@@ -43,8 +44,23 @@ def _series(symbol: str, interval: str, n: int):
 
 def build_fake_binance() -> FastAPI:
     app = FastAPI()
+
+    @app.exception_handler(HTTPException)
+    async def binance_style_errors(_, exc: HTTPException):
+        """Gerçek Binance hata gövdesi: {"code": -2013, "msg": "..."} (FastAPI'nin {"detail": ...} biçimi DEĞİL)."""
+        body = exc.detail if isinstance(exc.detail, dict) else {"code": -1000, "msg": str(exc.detail)}
+        return JSONResponse(body, status_code=exc.status_code)
+
     app.state.fail_book_ticker = False
     app.state.request_log = []
+    app.state.price_override = {}
+    app.state.balances = {"USDT": 500.0, "AAA": 100.0, "BBB": 50.0, "NOPAIR": 3.0}
+    app.state.can_trade, app.state.can_withdraw = True, False
+    app.state.commission = "base"  # base | usdt | bnb
+    app.state.fail_mode = None  # None | timeout_after_fill | timeout_no_fill | timeout_and_query_fails
+    app.state.open_orders = []
+    app.state.orders = {}  # clientOrderId -> emir
+    app.state.order_seq = 1000
 
     @app.middleware("http")
     async def log_requests(request, call_next):
@@ -66,6 +82,8 @@ def build_fake_binance() -> FastAPI:
         return {"symbols": syms}
 
     def _last(symbol):
+        if symbol in app.state.price_override:
+            return app.state.price_override[symbol]
         return float(_series(symbol, "5m", 300).close[-1])
 
     @app.get("/api/v3/ticker/24hr")
@@ -117,9 +135,94 @@ def build_fake_binance() -> FastAPI:
     @app.get("/api/v3/account")
     def account(request: Request):
         check_signed(request)
-        return {"canTrade": True, "canWithdraw": False, "permissions": ["SPOT"],
-                "balances": [{"asset": "USDT", "free": "500", "locked": "0"}, {"asset": "AAA", "free": "100", "locked": "0"},
-                             {"asset": "BBB", "free": "50", "locked": "0"}, {"asset": "NOPAIR", "free": "3", "locked": "0"}]}
+        st = app.state
+        return {"canTrade": st.can_trade, "canWithdraw": st.can_withdraw, "permissions": ["SPOT"],
+                "balances": [{"asset": a, "free": f"{v:.8f}", "locked": "0.00000000"} for a, v in st.balances.items()]}
+
+    def book_prices(symbol):
+        last, p = _last(symbol), PROFILES[symbol]
+        half = last * p["spread"] / 200
+        return last - half, last + half
+
+    def validate_order(q):
+        st = app.state
+        symbol, side, typ, qty = q["symbol"], q["side"], q["type"], float(q["quantity"])
+        if symbol not in PROFILES:
+            raise HTTPException(400, {"code": -1121, "msg": "Invalid symbol."})
+        if typ != "MARKET":
+            raise HTTPException(400, {"code": -1116, "msg": "Invalid orderType."})
+        if abs(round(qty / 0.001) * 0.001 - qty) > 1e-9:
+            raise HTTPException(400, {"code": -1013, "msg": "Filter failure: LOT_SIZE"})
+        bid, ask = book_prices(symbol)
+        px = ask if side == "BUY" else bid
+        if qty * px < 5.0:
+            raise HTTPException(400, {"code": -1013, "msg": "Filter failure: NOTIONAL"})
+        base = symbol[:-4]
+        if side == "BUY" and st.balances.get("USDT", 0) < qty * px:
+            raise HTTPException(400, {"code": -2010, "msg": "Account has insufficient balance for requested action."})
+        if side == "SELL" and st.balances.get(base, 0) < qty - 1e-12:
+            raise HTTPException(400, {"code": -2010, "msg": "Account has insufficient balance for requested action."})
+        return symbol, side, qty, px, base
+
+    @app.post("/api/v3/order/test")
+    def order_test(request: Request):
+        check_signed(request)
+        validate_order(dict(request.query_params))
+        return {}
+
+    @app.post("/api/v3/order")
+    def new_order(request: Request):
+        check_signed(request)
+        st = app.state
+        q = dict(request.query_params)
+        cid = q.get("newClientOrderId", f"auto{st.order_seq}")
+        if cid in st.orders:
+            raise HTTPException(400, {"code": -2010, "msg": "Duplicate order sent."})
+        if st.fail_mode == "timeout_no_fill":
+            raise HTTPException(503, "service unavailable")
+        symbol, side, qty, px, base = validate_order(q)
+        st.order_seq += 1
+        fee_rate = 0.001
+        if side == "BUY":
+            if st.commission == "base":
+                fee, asset = qty * fee_rate, base
+                st.balances["USDT"] -= qty * px
+                st.balances[base] = st.balances.get(base, 0) + qty - fee
+            elif st.commission == "usdt":
+                fee, asset = qty * px * fee_rate, "USDT"
+                st.balances["USDT"] -= qty * px + fee
+                st.balances[base] = st.balances.get(base, 0) + qty
+            else:
+                fee, asset = qty * px * fee_rate * 0.75 / 600, "BNB"
+                st.balances["USDT"] -= qty * px
+                st.balances[base] = st.balances.get(base, 0) + qty
+        else:
+            fee, asset = qty * px * fee_rate, "USDT"
+            st.balances[base] -= qty
+            st.balances["USDT"] += qty * px - fee
+        order = {"symbol": symbol, "orderId": st.order_seq, "clientOrderId": cid, "transactTime": 0, "price": "0.00000000",
+                 "origQty": f"{qty:.8f}", "executedQty": f"{qty:.8f}", "cummulativeQuoteQty": f"{qty * px:.8f}", "status": "FILLED",
+                 "type": "MARKET", "side": side,
+                 "fills": [{"price": f"{px:.8f}", "qty": f"{qty:.8f}", "commission": f"{fee:.8f}", "commissionAsset": asset, "tradeId": st.order_seq}]}
+        st.orders[cid] = order
+        if st.fail_mode in ("timeout_after_fill", "timeout_and_query_fails"):
+            raise HTTPException(503, "gateway timeout")  # emir GERÇEKLEŞTİ ama yanıt gelmedi
+        return order
+
+    @app.get("/api/v3/order")
+    def get_order(request: Request, symbol: str, origClientOrderId: str):
+        check_signed(request)
+        if app.state.fail_mode == "timeout_and_query_fails":
+            raise HTTPException(503, "down")
+        o = app.state.orders.get(origClientOrderId)
+        if not o:
+            raise HTTPException(400, {"code": -2013, "msg": "Order does not exist."})
+        return {k: v for k, v in o.items() if k != "fills"}
+
+    @app.get("/api/v3/openOrders")
+    def open_orders(request: Request, symbol: str | None = None):
+        check_signed(request)
+        return app.state.open_orders
 
     @app.get("/api/v3/myTrades")
     def my_trades(request: Request, symbol: str):

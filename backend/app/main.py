@@ -15,13 +15,16 @@ import httpx
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 
+from .api.mode import router as mode_router
 from .api.portfolio import router as portfolio_router
 from .api.routes import router
 from .config import AppConfig, get_config, resolve_secret_key
 from .db import Database
 from .exchange.binance import BinanceClient
 from .exchange.stream import PriceFeed
-from .logging_setup import DBLogHandler, setup_logging
+from .logging_setup import DBLogHandler, register_secret, setup_logging
+from .models import ApiCredential
+from .trading.live import ExchangeExecutor
 from .security import AuthState, PasswordGate
 from .notify import Notifier
 from .portfolio.service import PortfolioService
@@ -66,7 +69,22 @@ def create_app(cfg: AppConfig | None = None, http: httpx.AsyncClient | None = No
         notifier = Notifier(db, cfg.telegram_bot_token, cfg.telegram_chat_id)
         portfolio = PortfolioService(db, notifier)
         bot = BotRunner(db, store, client, feed, service, notifier, portfolio)
-        make_client = lambda key=None, secret=None, base=None: BinanceClient(base or cfg.binance_rest_url, key, secret, http=http)  # noqa: E731
+        make_client = lambda key=None, secret=None, base=None: BinanceClient(base or cfg.binance_trade_rest_url, key, secret, http=http)  # noqa: E731
+
+        async def build_executor(mode: str) -> ExchangeExecutor:
+            """testnet/live için kayıtlı (şifreli) anahtarlarla imzalı istemci kurar."""
+            async with db.session() as ses:
+                row = await ses.get(ApiCredential, mode)
+            if row is None:
+                raise ValueError(f"{mode} için API anahtarı kayıtlı değil")
+            key, secret = auth.vault.decrypt(row.api_key_enc), auth.vault.decrypt(row.api_secret_enc)
+            register_secret(key)
+            register_secret(secret)
+            base = cfg.binance_testnet_rest_url if mode == "testnet" else cfg.binance_trade_rest_url
+            return ExchangeExecutor(make_client(key, secret, base), mode, (await store.get()).fee_rate_pct / 100)
+
+        service.executor_factory = build_executor
+        service.live_allowed = cfg.allow_live_trading
         app.state.ctx = AppContext(cfg, db, auth, store, client, feed, service, bot, handler, notifier, portfolio, make_client)
         writer = asyncio.create_task(handler.run_writer(db), name="log-writer")
         if cfg.enable_bot_runtime:
@@ -74,7 +92,8 @@ def create_app(cfg: AppConfig | None = None, http: httpx.AsyncClient | None = No
         else:
             await bot.load_state()
             await service.ensure_account()
-        log.info("AI KRİPTO YÖNETİCİSİ hazır. Mod: PAPER (sanal). Gerçek para: KİLİTLİ.")
+            await service.load_mode()
+        log.info("AI KRİPTO YÖNETİCİSİ hazır. İşlem modu: %s. Sunucuda gerçek işlem: %s.", service.mode.upper(), "İZİNLİ" if cfg.allow_live_trading else "KİLİTLİ")
         try:
             yield
         finally:
@@ -88,6 +107,7 @@ def create_app(cfg: AppConfig | None = None, http: httpx.AsyncClient | None = No
     app = FastAPI(title="AI KRİPTO YÖNETİCİSİ", version="0.1.0", lifespan=lifespan, docs_url="/api/docs", openapi_url="/api/openapi.json")
     app.include_router(router)
     app.include_router(portfolio_router)
+    app.include_router(mode_router)
 
     @app.exception_handler(Exception)
     async def unhandled(_, exc: Exception):

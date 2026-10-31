@@ -216,7 +216,7 @@ async def apply_profile(body: ProfileBody, request: Request):
 @router.get("/reports/daily")
 async def daily_report(request: Request):
     c = ctx(request)
-    title, body = await build_daily_report(c.db, c.service, dict(c.feed.prices))
+    title, body = await build_daily_report(c.db, c.service, c.bot.price_map())
     return {"title": title, "body": body}
 
 

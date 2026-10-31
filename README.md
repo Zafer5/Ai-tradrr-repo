@@ -2,8 +2,8 @@
 
 Binance Spot piyasasını tarayan, teknik analizle coinleri puanlayan ve **sanal (paper) para** ile otomatik al-sat simülasyonu yapan sistem. Telefondan kullanılan Türkçe web paneli içerir.
 
-> **Durum (v0.2):** Aşama 1 (Paper Trading) ve mevcut coin yönetimi (izle-öner / gölge) çalışır durumdadır. Aşama 2 (Testnet) için anahtar kaydı + bağlantı testi hazırdır, Testnet'e otomatik emir gönderimi henüz bağlı değildir. **Aşama 3 (gerçek para) kod düzeyinde kilitlidir; Binance hesabınızda hiçbir emir gönderilmez.**
-> Bu sistem kâr garantisi vermez. Puanlama kural tabanlıdır (makine öğrenmesi değildir) ve gerçek veriyle backtest edilene kadar kanıtlanmış bir stratejisi yoktur.
+> **Durum (v0.3):** Bot üç modda çalışır: **sanal (paper)**, **Testnet** (Binance'in sanal paralı test borsasına gerçek emir akışı) ve **GERÇEK hesap**. Gerçek mod varsayılan olarak kapalıdır ve ancak aşağıdaki "Gerçek işleme geçiş" adımlarıyla açılır.
+> **Önemli:** Kod, gerçek Binance'e karşı henüz hiç çalıştırılmadı (geliştirme ortamında Binance erişimi yoktu; emir akışı Binance'in belgelenmiş davranışını taklit eden yerel sunucuyla test edildi). Strateji gerçek veriyle backtest edilmedi. Kâr garantisi yoktur, para kaybedebilirsiniz.
 
 ## Neler var?
 | Bölüm | Açıklama |
@@ -23,6 +23,20 @@ Binance Spot piyasasını tarayan, teknik analizle coinleri puanlayan ve **sanal
 2. Botunuza bir mesaj yazın, sonra `@userinfobot` ile kendi **chat id** numaranızı öğrenin.
 3. `.env` dosyanıza `TELEGRAM_BOT_TOKEN=...` ve `TELEGRAM_CHAT_ID=...` ekleyip `docker compose up -d` çalıştırın.
 (Token'ı sohbetlere yapıştırmayın.) Tarayıcı push bildirimi (Web Push) henüz yok.
+
+## Gerçek işleme geçiş (adım adım)
+**Sırayı atlamayın.** Her adımı birkaç gün gözlemleyin.
+1. **Sanal mod** — botu başlatın, kararlarını ve raporlarını izleyin.
+2. **Testnet** — [testnet.binance.vision](https://testnet.binance.vision) hesabı ve API anahtarı açın. Panel → *API Bağlantıları* → Testnet anahtarını kaydedin → *İşlem Modu* → Testnet. Testnet fiyatları gerçek piyasadan farklıdır; amaç emir akışının (alım, satım, komisyon, hata durumları) doğru çalıştığını görmektir.
+3. **Gerçek hesap** (hazırsanız):
+   - Binance → API Yönetimi'nde **ayrı** bir anahtar oluşturun: yalnızca **Spot alım-satım** açık, **para çekme KAPALI**, **sunucunuzun IP'siyle kısıtlı**. Sistem para çekme yetkisi açık anahtarı reddeder.
+   - Sunucudaki `.env` dosyasına `ALLOW_LIVE_TRADING=true` ekleyip `docker compose up -d` çalıştırın (sunucu kilidi).
+   - Panel → *API Bağlantıları* → gerçek anahtarı kaydedin → *İşlem Modu* → **azami sermaye** (örn. 50-100 USDT), onay cümlesi ve şifre girerek etkinleştirin.
+   - Bot yine kapalı başlar; Ana Sayfa'dan elle başlatırsınız (ek onay sorulur).
+
+**Gerçek modda güvenlik önlemleri:** bot yalnızca sizin belirlediğiniz sermaye tavanını kullanır · yalnızca piyasa emri, otomatik tekrar denenmez, her emrin benzersiz kimliği vardır · her emirden önce bakiye, miktar adımı, asgari tutar, bekleyen emir ve borsa doğrulaması (`order/test`) yapılır · emir sonucu belirsizse emir kimliğiyle sorgulanır, yine belirsizse **tüm yeni emirler durur** · borsa bakiyesi kayıtlarla uyuşmazsa durur · hesapta aynı coinden bakiyeniz varsa o coine alım yapmaz · günlük zarar limiti, güvenli mod ve acil durdurma çalışır.
+
+**Gerçek modun bilinen sınırları:** (1) Stop-loss ve hedefler **bot çalışırken sunucuda** uygulanır; borsada bekleyen koruma emri yoktur. Sunucu veya bağlantı kesilirse açık pozisyon korumasız kalır. (2) Piyasa emri kayması ve ani fiyat boşlukları stop'tan daha kötü fiyatla dolum yaratabilir. (3) "Mevcut coinlerim" yönetimi hâlâ yalnızca öneri/gölge: gerçek hesabınızdaki elinizdeki coinlere bot emir göndermez.
 
 ## PostgreSQL (isteğe bağlı, henüz canlıda denenmedi)
 Varsayılan SQLite'tır. PostgreSQL için `.env` içine `DATABASE_URL=postgresql+asyncpg://kullanici:sifre@sunucu:5432/veritabani` yazın. Şema `create_all` ile oluşur; **şema geçişi (migration) aracı henüz yok**, sürüm yükseltmelerinde yeni tablolar otomatik eklenir ama mevcut tablolara yeni sütun eklenmez.
@@ -47,7 +61,7 @@ Chrome'da menü → "Ana ekrana ekle". (Tam PWA kurulumu için HTTPS gerekir: Ta
 ## Geliştirme
 ```bash
 cd backend && python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python -m pytest                       # 100 test
+.venv/bin/python -m pytest                       # 117 test
 ADMIN_PASSWORD=uzun-bir-sifre .venv/bin/uvicorn app.main:create_app --factory --port 8000
 cd frontend && npm install && npm run dev        # http://localhost:5173
 ```
@@ -55,7 +69,7 @@ Backtest (gerçek Binance verisi, anahtar gerekmez):
 `cd backend && .venv/bin/python -m app.backtest.cli BTCUSDT --days 120`
 
 ## Güvenlik
-- API anahtarları Fernet ile şifreli saklanır, panele geri gönderilmez, loglarda maskelenir. Sistem **para çekme yetkisi istemez**; Testnet testi, yetki açıksa sizi uyarır.
+- API anahtarları Fernet ile şifreli saklanır, panele geri gönderilmez, loglarda maskelenir. Sistem **para çekme yetkisi istemez**; yetki açıksa gerçek/Testnet moda geçişi **reddeder**.
 - `.env` Git'e girmez. Panel girişi scrypt + 5 hatalı denemede kilit + httpOnly/SameSite=Strict çerez.
 - **API Secret'ınızı sohbetlere/ekran görüntülerine koymayın.**
 
@@ -63,6 +77,6 @@ Backtest (gerçek Binance verisi, anahtar gerekmez):
 - Canlı Binance'e karşı doğrulama henüz yapılmadı: geliştirme ortamında Binance erişimi kapalıydı; uçtan uca testler yerel taklit sunucuyla yapıldı. İlk çalıştırmada **Sistem Günlükleri** ve **API Bağlantıları** ekranlarını kontrol edin.
 - WebSocket akışı (`!miniTicker@arr`) canlıda doğrulanmadı; kopma halinde REST yedeği devreye girer.
 - Paper modunda komisyon USDT olarak düşülür (Binance çoğu zaman alınan coinden keser); stop/hedef kontrolü 2 sn aralıklıdır.
-- Kademeli *alım*, mevcut coinlere ek alım, Testnet emir yürütme, tarayıcı push bildirimi, Bitget/Paribu henüz yok (mimari buna uygundur: `app/exchange`).
+- Kademeli *alım*, mevcut coinlere ek alım, borsada bekleyen stop emri (OCO), tarayıcı push bildirimi, Bitget/Paribu henüz yok (mimari buna uygundur: `app/exchange`).
 - Binance hesap okuma (`/account`, `/myTrades`) ve Telegram gönderimi yalnızca yerel taklit sunucu/sahte istemciyle test edildi; ilk kullanımda sonuçları kontrol edin. Komisyonu BNB ile ödenen alımlarda maliyet yaklaşık hesaplanır; geçmişi eksik coinlerin maliyetini elle girmeniz istenir.
 - Skor ağırlıkları sezgiseldir; gerçek veriyle backtest edilip doğrulanmadan gerçek parada kullanılmamalıdır.

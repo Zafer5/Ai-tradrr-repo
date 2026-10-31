@@ -4,7 +4,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from sqlalchemy import event
+from sqlalchemy import event, inspect, literal, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from .models import Base
@@ -31,6 +31,25 @@ class Database:
     async def create_all(self) -> None:
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(self._add_missing_columns)
+
+    @staticmethod
+    def _add_missing_columns(conn) -> None:
+        """Basit şema geçişi: mevcut tablolara sonradan eklenen sütunları ekler (veri silinmez).
+        Yalnızca YENİ ve boş bırakılabilir sütunlar için tasarlanmıştır; sütun silme/yeniden adlandırma yapmaz."""
+        insp = inspect(conn)
+        for table in Base.metadata.sorted_tables:
+            if not insp.has_table(table.name):
+                continue
+            existing = {c["name"] for c in insp.get_columns(table.name)}
+            for col in table.columns:
+                if col.name in existing:
+                    continue
+                ddl = f'ALTER TABLE {table.name} ADD COLUMN {col.name} {col.type.compile(dialect=conn.dialect)}'
+                if col.default is not None and getattr(col.default, "is_scalar", False):
+                    lit = literal(col.default.arg).compile(dialect=conn.dialect, compile_kwargs={"literal_binds": True})
+                    ddl += f" DEFAULT {lit}"
+                conn.execute(text(ddl))
 
     @asynccontextmanager
     async def session(self):

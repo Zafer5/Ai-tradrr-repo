@@ -52,7 +52,7 @@ export default function Positions() {
   };
   return (
     <>
-      <PageHeader title="Açık Pozisyonlar" subtitle="Sanal (paper) pozisyonlar · fiyatlar canlı akıştan her 3 saniyede güncellenir." />
+      <PageHeader title="Açık Pozisyonlar" subtitle="Bot pozisyonları · fiyatlar her 3 saniyede güncellenir. Stop/hedef takibi bot çalışırken sunucuda yapılır." />
       {d.items.length === 0 ? <Card><Empty icon={<BriefcaseBusiness size={22} />} title="Açık pozisyon yok">Bot açıkken ve fırsat risk kontrolünü geçince burada görünür.</Empty></Card> : (
         <div className="grid split-even">
           {d.items.map((p: J) => (
@@ -63,7 +63,7 @@ export default function Positions() {
               </div>
               <Rail p={p} />
               <div className="row wrap mt-s" style={{ gap: 6 }}>
-                <Badge kind="warn">SANAL</Badge>
+                {p.mode === "live" ? <Badge kind="bad">GERÇEK</Badge> : p.mode === "testnet" ? <Badge kind="info">TESTNET</Badge> : <Badge kind="warn">SANAL</Badge>}
                 {p.tp1_done && <Badge kind="ok">1. hedef alındı · stop başa baş üstünde</Badge>}
                 {p.trailing_active && <Badge kind="info">Trailing aktif</Badge>}
               </div>

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Bell, BrainCircuit, BriefcaseBusiness, Cable, CandlestickChart, LayoutDashboard, LineChart, LogOut, LucideIcon, Menu, Moon, Radar, ReceiptText, ScrollText, ShieldCheck, SlidersHorizontal, Sun, SunMoon, Wallet, Lock, AlertOctagon, TrendingDown, ShieldAlert } from "lucide-react";
+import { Bell, BrainCircuit, BriefcaseBusiness, Cable, CandlestickChart, LayoutDashboard, LineChart, LogOut, LucideIcon, Menu, Moon, Radar, Rocket, ReceiptText, ScrollText, ShieldCheck, SlidersHorizontal, Sun, SunMoon, Wallet, Lock, AlertOctagon, TrendingDown, ShieldAlert } from "lucide-react";
 import { api, J } from "./api";
 import { ago } from "./format";
 import { applyTheme, getTheme, ThemePref } from "./theme";
@@ -16,6 +16,7 @@ import Connections from "./pages/Connections";
 import Logs from "./pages/Logs";
 import Portfolio from "./pages/Portfolio";
 import Notifications from "./pages/Notifications";
+import TradingMode from "./pages/TradingMode";
 
 type Route = { id: string; label: string; short: string; icon: LucideIcon; el: () => JSX.Element; group: string };
 
@@ -28,6 +29,7 @@ export const ROUTES: Route[] = [
   { id: "history", label: "İşlem Geçmişi", short: "Geçmiş", icon: ReceiptText, el: History, group: "Raporlar" },
   { id: "report", label: "Kâr-Zarar Raporu", short: "Rapor", icon: LineChart, el: Report, group: "Raporlar" },
   { id: "notifications", label: "Bildirimler", short: "Bildirim", icon: Bell, el: Notifications, group: "Raporlar" },
+  { id: "mode", label: "İşlem Modu", short: "Mod", icon: Rocket, el: TradingMode, group: "Sistem" },
   { id: "risk", label: "Risk Yönetimi", short: "Risk", icon: ShieldCheck, el: Risk, group: "Sistem" },
   { id: "settings", label: "Bot Ayarları", short: "Ayarlar", icon: SlidersHorizontal, el: Settings, group: "Sistem" },
   { id: "connections", label: "API Bağlantıları", short: "API", icon: Cable, el: Connections, group: "Sistem" },
@@ -78,9 +80,19 @@ function Login({ onDone }: { onDone: () => void }) {
           {err && <div className="mt"><Banner kind="bad">{err}</Banner></div>}
           <button className="btn primary block mt" disabled={busy || !pw}>{busy ? "Giriş yapılıyor…" : "Giriş yap"}</button>
         </form>
-        <div className="row mt" style={{ justifyContent: "center", gap: 8 }}><Badge kind="warn"><Lock size={11} /> Sanal mod</Badge><Badge>Gerçek para kilitli</Badge></div>
+        <div className="row mt" style={{ justifyContent: "center", gap: 8 }}><Badge kind="warn"><Lock size={11} /> Güvenli giriş</Badge></div>
       </div>
     </main>
+  );
+}
+
+function HaltClear() {
+  const [msg, setMsg] = useState<string | null>(null);
+  return (
+    <>
+      <button className="btn sm" onClick={async () => { try { await api.post("/bot/clear-halt"); setMsg("Doğrulandı."); } catch (e) { setMsg((e as Error).message); } }}>Durumu doğrula</button>
+      {msg && <span className="small" style={{ marginLeft: 8 }}>{msg}</span>}
+    </>
   );
 }
 
@@ -90,7 +102,8 @@ function Alerts({ s }: { s: J }) {
     <>
       {b.emergency && <Banner kind="bad" icon={<AlertOctagon />}><b>Acil durdurma aktif.</b> Yeni alım yapılmaz. Risk Yönetimi sayfasından kaldırabilirsiniz.</Banner>}
       {m.shock_active && <Banner kind="bad" icon={<TrendingDown />}><b>Ani düşüş koruması:</b> {m.regime?.shock_reason ?? "BTC sert düştü"}. Yeni alımlar geçici olarak durduruldu.</Banner>}
-      {b.safe_mode && <Banner kind="warn" icon={<ShieldAlert />}><b>Güvenli mod:</b> {b.safe_mode}. Yeni alım yapılmıyor.</Banner>}
+      {b.halt && <Banner kind="bad" icon={<AlertOctagon />}><b>Yeni emirler durduruldu:</b> {b.halt}<div className="mt-s"><a href="#/mode" className="btn danger sm">İşlem Modu'na git</a> <HaltClear /></div></Banner>}
+      {b.safe_mode && !b.halt && <Banner kind="warn" icon={<ShieldAlert />}><b>Güvenli mod:</b> {b.safe_mode}. Yeni alım yapılmıyor.</Banner>}
       {m.scan_error && <Banner kind="warn">Piyasa verisi hatası: {m.scan_error}</Banner>}
     </>
   );
@@ -100,7 +113,9 @@ function Ribbon({ s }: { s: J }) {
   const b = s.bot, m = s.market;
   return (
     <div className="ribbon">
-      <span className="paper-pill"><Lock size={12} /> SANAL İŞLEM · gerçek para kullanılmıyor</span>
+      {b.mode === "live" ? <span className="paper-pill live"><span className="dot live" /> GERÇEK İŞLEM · gerçek para</span>
+        : b.mode === "testnet" ? <span className="paper-pill testnet"><Lock size={12} /> TESTNET · sanal paralı test borsası</span>
+        : <span className="paper-pill"><Lock size={12} /> SANAL İŞLEM · gerçek para kullanılmıyor</span>}
       <Badge kind={b.enabled ? "ok" : ""} dot={b.enabled}>{b.enabled ? "Bot çalışıyor" : "Bot durdu"}</Badge>
       <Badge kind={m.ws_connected ? "ok" : "warn"}>{m.ws_connected ? "Canlı akış" : "REST yedek"}</Badge>
       {m.regime && <Badge kind={m.regime.direction === "Yükseliş" ? "ok" : m.regime.direction === "Düşüş" ? "bad" : ""}>BTC {m.regime.direction}</Badge>}

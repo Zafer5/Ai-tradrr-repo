@@ -224,7 +224,7 @@ async def test_api_keys_are_encrypted_masked_and_never_returned_or_logged(authed
     conns = (await env.api.get("/api/connections")).text
     assert secret not in conns and key not in conns and "…" in conns
     j = (await env.api.get("/api/connections")).json()
-    assert j["live"]["locked"] is True and j["live"]["configured"] is False and j["market_data"]["needs_key"] is False
+    assert j["live"]["configured"] is False and j["live"]["server_allowed"] is False and j["live"]["active"] is False and j["market_data"]["needs_key"] is False
 
     async with env.ctx.db.session() as ses:
         row = await ses.get(ApiCredential, "testnet")
@@ -244,7 +244,9 @@ async def test_api_keys_are_encrypted_masked_and_never_returned_or_logged(authed
 
     assert (await env.api.delete("/api/connections/testnet")).status_code == 200
     assert (await env.api.get("/api/connections")).json()["testnet"]["configured"] is False
-    assert (await env.api.put("/api/connections/live", json={"api_key": key, "api_secret": secret})).status_code in (404, 405)
+    r2 = await env.api.put("/api/connections/live", json={"api_key": key, "api_secret": secret})
+    assert r2.status_code == 200 and secret not in r2.text and key not in r2.text
+    assert secret not in (await env.api.get("/api/connections")).text
 
 
 async def test_frontend_never_receives_secret_key_or_password_hash(authed):

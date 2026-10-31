@@ -12,9 +12,9 @@ async def build_daily_report(db, service, prices: dict[str, float]) -> tuple[str
     equity, cash, open_value = await service.equity(prices)
     start = await service.roll_day(equity)
     async with db.session() as ses:
-        closed = list((await ses.execute(select(Position).where(Position.closed_at >= day_start_utc()))).scalars())
-        opened = (await ses.execute(select(func.count(Position.id)).where(Position.opened_at >= day_start_utc()))).scalar_one()
-        fees = (await ses.execute(select(func.coalesce(func.sum(Order.fee), 0.0)).where(Order.created_at >= day_start_utc()))).scalar_one()
+        closed = list((await ses.execute(select(Position).where(Position.closed_at >= day_start_utc(), Position.mode == service.mode))).scalars())
+        opened = (await ses.execute(select(func.count(Position.id)).where(Position.opened_at >= day_start_utc(), Position.mode == service.mode))).scalar_one()
+        fees = (await ses.execute(select(func.coalesce(func.sum(Order.fee), 0.0)).where(Order.created_at >= day_start_utc(), Order.mode == service.mode))).scalar_one()
     realized = sum(p.realized_pnl for p in closed)
     wins = sum(1 for p in closed if p.realized_pnl > 0)
     day = equity - start
@@ -26,4 +26,4 @@ async def build_daily_report(db, service, prices: dict[str, float]) -> tuple[str
     ]
     for p in closed[-5:]:
         lines.append(f"• {p.symbol.replace('USDT', '')}: {p.realized_pnl:+.3f} USDT ({REASON_TR.get(p.close_reason or '', p.close_reason)})")
-    return "Günlük rapor (sanal işlemler)", "\n".join(lines)
+    return f"Günlük rapor ({service.mode_label} işlemler)", "\n".join(lines)

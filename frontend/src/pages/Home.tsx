@@ -28,6 +28,7 @@ export default function Home() {
   const pf = usePoll(() => api.get("/portfolio"), 15000);
   const toast = useToast();
   const [confirm, setConfirm] = useState(false);
+  const [confirmLive, setConfirmLive] = useState(false);
   const [closeAll, setCloseAll] = useState(false);
   const [sheet, setSheet] = useState<string | null>(null);
 
@@ -37,6 +38,8 @@ export default function Home() {
   const up = a.total_pnl >= 0;
 
   const toggle = async () => {
+    if (!b.enabled && b.mode === "live" && !confirmLive) { setConfirmLive(true); return; }
+    setConfirmLive(false);
     try {
       await api.post(b.enabled ? "/bot/stop" : "/bot/start");
       toast(b.enabled ? "Bot durduruldu. Açık pozisyonların stop/hedef takibi sürüyor." : "Bot başlatıldı. Fırsatlar risk kontrolüyle değerlendirilecek.", "ok");
@@ -59,7 +62,7 @@ export default function Home() {
           <div className="hero">
             <div className="top">
               <div>
-                <div className="lab"><Wallet size={15} /> Toplam sanal portföy değeri</div>
+                <div className="lab"><Wallet size={15} /> {b.mode === "paper" ? "Toplam sanal portföy değeri" : `Bot sermayesi · ${b.mode_label} hesap (tavan ${usd(a.initial, 0)} USDT)`}</div>
                 <div className="big">{usd(a.equity)}<small>USDT</small></div>
                 <span className={`chg ${up ? "pos" : "neg"}`}>{up ? <ArrowUpRight /> : <ArrowDownRight />}{signed(a.total_pnl)} USDT · {pct(a.total_pnl_pct, 2, true)} <span className="dim" style={{ fontWeight: 500 }}>toplam</span></span>
               </div>
@@ -150,6 +153,7 @@ export default function Home() {
           <label className="row mt" style={{ gap: 10, cursor: "pointer" }}><input type="checkbox" style={{ width: 18, height: 18 }} checked={closeAll} onChange={(e) => setCloseAll(e.target.checked)} /><span className="small">Açık pozisyonları da piyasa fiyatından kapat</span></label>
         </Confirm>
       )}
+      {confirmLive && <Confirm title="Gerçek parayla başlat" text={`Bot GERÇEK Binance hesabınızda, en fazla ${usd(a.initial, 0)} USDT sermaye ile gerçek emirler verecek. Başlatılsın mı?`} yesLabel="Evet, başlat" onYes={toggle} onNo={() => setConfirmLive(false)} />}
       {sheet && <CoinSheet symbol={sheet} onClose={() => setSheet(null)} />}
     </>
   );

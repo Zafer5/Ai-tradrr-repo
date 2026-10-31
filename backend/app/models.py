@@ -70,6 +70,7 @@ class Order(Base):
     price: Mapped[float] = mapped_column(Float)
     fee: Mapped[float] = mapped_column(Float)
     reason: Mapped[str] = mapped_column(String(32), default="")
+    exchange_order_id: Mapped[str | None] = mapped_column(String(48), nullable=True)  # Binance orderId / clientOrderId
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
@@ -115,6 +116,7 @@ class EquitySnapshot(Base):
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     equity: Mapped[float] = mapped_column(Float)
     cash: Mapped[float] = mapped_column(Float)
+    mode: Mapped[str] = mapped_column(String(8), default="paper")
 
 
 class Holding(Base):

@@ -66,7 +66,7 @@ export default function Settings() {
         </Card>
       ))}
 
-      <Card title="Sanal hesap" subtitle="Sanal bakiyeyi ve tüm sanal işlem kayıtlarını sıfırlar. Bot kapalı olmalıdır.">
+      <Card title="Sanal hesap" subtitle="Sanal bakiyeyi ve tüm sanal işlem kayıtlarını sıfırlar. Yalnızca SANAL modda ve bot kapalıyken. Testnet/gerçek kayıtlar silinmez.">
         <button className="btn danger" onClick={() => setPaperAsk(true)}><Trash2 /> Sanal hesabı sıfırla</button>
       </Card>
 

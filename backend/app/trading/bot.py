@@ -30,6 +30,7 @@ from ..models import AnalysisLog, EquitySnapshot, LogEntry, utcnow
 from ..risk.manager import EntryRequest, SystemFlags, evaluate_entry
 from ..trading_settings import SettingsStore, TradingSettings
 from .exits import ExitAction, PosState, evaluate_exit
+from .live import OrderRejected, OrderUncertain
 from .service import TradingService
 
 log = logging.getLogger("app.bot")
@@ -51,6 +52,11 @@ class BotRunner:
         self._daily_report_date = ""
         self._loss_notified_date = ""
         self._was_safe = False
+        self.halt_reason: str | None = None  # belirsiz emir / bakiye uyuşmazlığı: insan doğrulamadan kalkmaz
+        self._testnet_prices: dict[str, float] = {}
+        self._testnet_prices_at = 0.0
+        self._exit_retry_at: dict[int, float] = {}
+        self._last_recon = 0.0
         self.enabled = False
         self.emergency = False
         self.emergency_reason = ""
@@ -90,13 +96,14 @@ class BotRunner:
     async def start(self) -> None:
         await self.load_state()
         await self.service.ensure_account()
+        await self.service.load_mode()
         self.feed.start()
         self._tasks = [
             asyncio.create_task(self._scan_loop(), name="scan"),
             asyncio.create_task(self._monitor_loop(), name="monitor"),
             asyncio.create_task(self._housekeeping_loop(), name="housekeeping"),
         ]
-        log.info("Bot servisi başladı (bot %s, acil durdurma %s)", "AÇIK" if self.enabled else "KAPALI", "AKTİF" if self.emergency else "yok")
+        log.info("Bot servisi başladı (mod %s, bot %s, acil durdurma %s)", self.service.mode.upper(), "AÇIK" if self.enabled else "KAPALI", "AKTİF" if self.emergency else "yok")
 
     async def shutdown(self) -> None:
         for t in self._tasks:
@@ -122,13 +129,79 @@ class BotRunner:
         if close_positions:
             s = await self.store.get()
             async with self.trade_lock:
-                closed = await self.service.close_all(dict(self.feed.prices), "EMERGENCY", s)
+                closed = await self.service.close_all(self.price_map(), "EMERGENCY", s, self.symbols)
         return closed
 
     async def clear_emergency(self) -> None:
         self.emergency, self.emergency_reason = False, ""
         await self._save_state()
         log.warning("Acil durdurma kaldırıldı (bot kapalı; elle başlatın)")
+
+    # ------------------------------------------------------------------ fiyat / halt
+    def price_map(self) -> dict[str, float]:
+        """Pozisyon değerleme fiyatları. Testnet'te pozisyonlar testnet fiyatıyla izlenir (testnet fiyatı gerçek piyasadan farklıdır)."""
+        p = dict(self.feed.prices)
+        if self.service.mode == "testnet":
+            p.update(self._testnet_prices)
+        return p
+
+    def get_price(self, symbol: str) -> float | None:
+        return self._testnet_prices.get(symbol) if self.service.mode == "testnet" else self.feed.get(symbol)
+
+    def price_age(self) -> float:
+        if self.service.mode == "testnet":
+            return time.time() - self._testnet_prices_at if self._testnet_prices_at else float("inf")
+        return self.feed.age
+
+    async def _refresh_testnet_prices(self, symbols: set[str]) -> None:
+        ex = self.service.exec
+        if ex is None or not symbols:
+            return
+        try:
+            allp = await ex.client.prices()
+            self._testnet_prices = {s: allp[s] for s in symbols if s in allp}
+            self._testnet_prices_at = time.time()
+        except Exception as e:
+            log.warning("Testnet fiyatları alınamadı: %s", e)
+
+    async def _halt(self, reason: str) -> None:
+        if self.halt_reason != reason:
+            self.halt_reason = reason
+            log.error("YENİ EMİRLER DURDURULDU: %s", reason)
+            await self.notifier.send("halt", "Belirsiz durum: yeni emirler durduruldu", f"{reason}\nBorsa hesabınızı kontrol edip panelden 'Durumu doğrula' ile devam edin. Açık pozisyonların stop/hedef takibi sürüyor.", "bad")
+
+    async def clear_halt(self) -> str | None:
+        """Bakiyeler kayıtlarla uyuşuyorsa halt'ı kaldırır; uyuşmuyorsa nedenini döndürür."""
+        problem = await self._reconcile(force=True)
+        if problem:
+            return problem
+        self.halt_reason = None
+        log.warning("Belirsiz durum kaydı kaldırıldı (insan doğrulaması)")
+        return None
+
+    async def _reconcile(self, force: bool = False) -> str | None:
+        """Borsa modunda kayıtlı pozisyonlar ile gerçek bakiyeleri karşılaştırır."""
+        svc = self.service
+        if not svc.is_exchange:
+            return None
+        if svc.exec is None:
+            return f"Borsa bağlantısı yok ({svc.exec_error})"
+        if not force and time.time() - self._last_recon < 60:
+            return None
+        self._last_recon = time.time()
+        try:
+            bal = await svc.exec.balances()
+            svc.exchange_free_usdt = bal.get("USDT", (0.0, 0.0))[0]
+        except Exception as e:
+            return f"Borsa bakiyesi okunamadı ({e})"
+        for p in await svc.open_positions():
+            base = p.symbol.replace("USDT", "")
+            have = sum(bal.get(base, (0.0, 0.0)))
+            if have < p.quantity * 0.97:
+                msg = f"{p.symbol}: kayıtlı {p.quantity:.8g}, borsada {have:.8g}. Pozisyon elle satılmış olabilir."
+                await self._halt(f"Bakiye uyuşmazlığı — {msg}")
+                return msg
+        return None
 
     # ------------------------------------------------------------------ veri
     async def get_candles(self, symbol: str) -> dict[str, Candles]:
@@ -274,19 +347,25 @@ class BotRunner:
 
     async def _consider_entry(self, a: Analysis, s: TradingSettings) -> None:
         flags = self._flags(s)
+        testnet = self.service.mode == "testnet"
+        if self.service.is_exchange and self.service.exec is None:
+            self._record(a, False, [f"Borsa bağlantısı yok: {self.service.exec_error}"])
+            return
         try:
-            bid, ask = await self.client.book_ticker(a.symbol)
+            # testnet'te emir testnet fiyatından dolar: fiyat o borsadan alınır
+            bid, ask = await (self.service.exec.client if testnet else self.client).book_ticker(a.symbol)
         except Exception as e:  # API hatası => emir yok
             self._record(a, False, [f"Güncel fiyat alınamadı: {e}"])
             log.warning("%s için güncel fiyat alınamadı, alım atlandı: %s", a.symbol, e)
             return
         spread = (ask - bid) / ((ask + bid) / 2) * 100 if bid > 0 and ask > 0 else None
-        if ask <= 0 or a.price <= 0 or abs(ask / a.price - 1) > 0.01:
+        if ask <= 0 or a.price <= 0 or (not testnet and abs(ask / a.price - 1) > 0.01):
             self._record(a, False, ["Güncel fiyat analiz fiyatından %1'den fazla saptı; analiz eskimiş"])
             return
         atr_abs = a.atr_pct / 100 * a.price
         stop, tp1, tp2 = build_plan(ask, atr_abs, PlanParams.from_settings(s))
-        acct = await self.service.snapshot(dict(self.feed.prices), self.in_flight, s.cooldown_minutes)
+        await self.service.refresh_exchange_cash()
+        acct = await self.service.snapshot(self.price_map(), self.in_flight, s.cooldown_minutes)
         req = EntryRequest(symbol=a.symbol, score=a.score, risk_level=a.risk, eligible=a.eligible, spread_pct=spread, change_pct=a.change_pct,
                           entry=ask * (1 + s.slippage_pct / 100), stop=stop, tp1=tp1, tp2=tp2)
         dec = evaluate_entry(req, acct, flags, s, self.symbols.get(a.symbol))
@@ -295,12 +374,20 @@ class BotRunner:
             return
         self.in_flight.add(a.symbol)
         try:
-            pos = await self.service.open_position(a.symbol, ask, dec, stop, tp1, tp2, a.score, a.risk, " ".join(a.rationale), s)
+            pos = await self.service.open_position(a.symbol, ask, dec, stop, tp1, tp2, a.score, a.risk, " ".join(a.rationale), s, self.symbols.get(a.symbol))
+        except OrderRejected as e:  # emir borsaya ulaşmadı/reddedildi: güvenli
+            self._record(a, False, [f"Borsa emri oluşmadı: {e}"])
+            log.warning("%s alımı gerçekleşmedi: %s", a.symbol, e)
+            return
+        except OrderUncertain as e:  # emrin akıbeti bilinmiyor: DUR
+            self._record(a, False, [f"Emir sonucu belirsiz: {e}"])
+            await self._halt(f"{a.symbol} alım emrinin sonucu doğrulanamadı: {e}")
+            return
         finally:
             self.in_flight.discard(a.symbol)
         if pos:
             await self.notifier.send(
-                "buy", f"ALIM (sanal): {a.symbol.replace('USDT', '')}",
+                "buy", f"ALIM ({self.service.mode_label}): {a.symbol.replace('USDT', '')}",
                 f"{pos.quantity:.6g} adet @ {pos.entry_price:.6g} (≈{pos.quantity * pos.entry_price:.2f} USDT)\nStop {stop:.6g} · Hedef1 {tp1:.6g} · Hedef2 {tp2:.6g}\n"
                 f"Neden (AI puanı {a.score:.0f}, risk {a.risk}): {' '.join(a.rationale[:2])}\nGüvenli işlem: risk kontrolü onayladı, tahmini komisyon {pos.est_fees:.3f} USDT.", "info")
 
@@ -320,8 +407,14 @@ class BotRunner:
         if self.scan_errors >= 3:
             reasons.append(f"piyasa verisi alınamıyor ({self.last_scan_error})")
         grace = time.time() - self.started_at < STALE_FEED_SEC
-        if (self.enabled or has_positions) and not grace and self.feed.age > STALE_FEED_SEC:
+        # Testnet'te alım kararı o borsadan anlık fiyat çeker; akış yaşı yalnızca AÇIK POZİSYON varken önemlidir
+        needs_feed = has_positions or (self.enabled and self.service.mode != "testnet")
+        if needs_feed and not grace and self.price_age() > STALE_FEED_SEC:
             reasons.append("canlı fiyat akışı kesik")
+        if self.halt_reason:
+            reasons.append(self.halt_reason)
+        if self.service.is_exchange and self.service.exec is None:
+            reasons.append(f"borsa bağlantısı yok ({self.service.exec_error})")
         new = "; ".join(reasons) or None
         if new != self.safe_reason:
             (log.error if new else log.info)("Güvenli mod %s", f"AKTİF: {new}" if new else "sona erdi")
@@ -330,26 +423,39 @@ class BotRunner:
     async def monitor_once(self) -> None:
         s = await self.store.get()
         positions = await self.service.open_positions()
+        if self.service.mode == "testnet":
+            await self._refresh_testnet_prices({p.symbol for p in positions})
         self._update_safe_mode(bool(positions))
         await self._side_tasks(s)
         if not positions:
             return
-        if self.feed.age > STALE_FEED_SEC:
+        if self.price_age() > STALE_FEED_SEC:
             if not self._warned_stale:
                 log.error("Fiyat akışı %d sn'den eski: açık pozisyonlar için stop kontrolü yapılamıyor!", STALE_FEED_SEC)
                 self._warned_stale = True
             return
         self._warned_stale = False
         for p in positions:
-            price = self.feed.get(p.symbol)
+            price = self.get_price(p.symbol)
             if price is None:
                 continue
             ev = evaluate_exit(PosState(p.entry_price, p.quantity, p.stop_price, p.tp1_price, p.tp2_price, p.tp1_done, p.peak_price, p.trailing_active), price, s)
             if ev.peak != p.peak_price or ev.trailing_active != p.trailing_active:
                 await self.service.update_position_state(p.id, ev.peak, ev.trailing_active)
             if ev.action:
-                async with self.trade_lock:
-                    after = await self.service.execute_exit(p.id, ev.action, s)
+                if time.time() < self._exit_retry_at.get(p.id, 0):
+                    continue
+                try:
+                    async with self.trade_lock:
+                        after = await self.service.execute_exit(p.id, ev.action, s, self.symbols.get(p.symbol))
+                except OrderRejected as e:  # satış gerçekleşmedi: pozisyon korunur, kısa süre sonra yeniden denenir
+                    self._exit_retry_at[p.id] = time.time() + 15
+                    log.error("%s satışı gerçekleşmedi (%s): %s — 15 sn sonra tekrar denenecek", p.symbol, ev.action.reason, e)
+                    await self.notifier.send("exit_fail", f"SATIŞ GERÇEKLEŞMEDİ: {p.symbol.replace('USDT', '')}", f"{ev.action.reason} tetiklendi ama borsa emri gerçekleşmedi: {e}\nSistem tekrar deneyecek.", "bad", f"exitfail{p.id}", 300)
+                    continue
+                except OrderUncertain as e:
+                    await self._halt(f"{p.symbol} satış emrinin sonucu doğrulanamadı: {e}")
+                    continue
                 if after:
                     await self._notify_exit(after, ev.action)
 
@@ -358,10 +464,12 @@ class BotRunner:
         if self.safe_reason and not self._was_safe:
             await self.notifier.send("safe", "Güvenli mod: yeni alımlar durdu", self.safe_reason, "bad", "safe", 600)
         self._was_safe = bool(self.safe_reason)
+        if self.service.is_exchange:
+            await self._reconcile()
         if time.time() - self._last_pf_eval < 10 or not self.feed.prices or self.feed.age > STALE_FEED_SEC:
             return
         self._last_pf_eval = time.time()
-        snap = await self.service.snapshot(dict(self.feed.prices), set(), 0)
+        snap = await self.service.snapshot(self.price_map(), set(), 0)
         from .service import today_str
 
         if snap.day_pnl_pct <= -s.daily_loss_limit_pct and self._loss_notified_date != today_str():
@@ -380,7 +488,7 @@ class BotRunner:
             self._daily_report_date = today_str()
             from ..report import build_daily_report
 
-            title, body = await build_daily_report(self.db, self.service, dict(self.feed.prices))
+            title, body = await build_daily_report(self.db, self.service, self.price_map())
             await self.notifier.send("daily_report", title, body, "info")
 
     async def _notify_exit(self, pos, action: ExitAction) -> None:
@@ -390,21 +498,24 @@ class BotRunner:
         coin = pos.symbol.replace("USDT", "")
         if pos.status == "CLOSED":
             lvl = "good" if pos.realized_pnl > 0 else "bad"
-            await self.notifier.send("sell", f"SATIŞ (sanal): {coin} — {why}", f"Pozisyon kapandı. Net sonuç (komisyon dahil): {pos.realized_pnl:+.3f} USDT\nNeden: {why}.", lvl)
+            await self.notifier.send("sell", f"SATIŞ ({self.service.mode_label}): {coin} — {why}", f"Pozisyon kapandı. Net sonuç (komisyon dahil): {pos.realized_pnl:+.3f} USDT\nNeden: {why}.", lvl)
             if action.reason == "STOP_LOSS":
                 await self.notifier.send("stoploss", f"Zarar sınırına ulaşıldı: {coin}", f"Stop-loss çalıştı, kayıp {pos.realized_pnl:+.3f} USDT. Sermaye korunuyor.", "warn")
         else:
-            await self.notifier.send("sell", f"KISMİ SATIŞ (sanal): {coin} — {why}", f"Pozisyonun bir kısmı satıldı, kalan {pos.quantity:.6g}. Stop başa baş üstüne çekildi. Şu ana kadar net {pos.realized_pnl:+.3f} USDT.", "good")
+            await self.notifier.send("sell", f"KISMİ SATIŞ ({self.service.mode_label}): {coin} — {why}", f"Pozisyonun bir kısmı satıldı, kalan {pos.quantity:.6g}. Stop başa baş üstüne çekildi. Şu ana kadar net {pos.realized_pnl:+.3f} USDT.", "good")
 
     async def close_position_manually(self, position_id: int) -> bool:
         s = await self.store.get()
         positions = {p.id: p for p in await self.service.open_positions()}
         p = positions.get(position_id)
-        price = self.feed.get(p.symbol) if p else None
+        price = self.get_price(p.symbol) if p else None
         if not p or not price:
             return False
-        async with self.trade_lock:
-            after = await self.service.execute_exit(p.id, ExitAction(1.0, "MANUAL", "MARKET", price), s)
+        try:
+            async with self.trade_lock:
+                after = await self.service.execute_exit(p.id, ExitAction(1.0, "MANUAL", "MARKET", price), s, self.symbols.get(p.symbol))
+        except (OrderRejected, OrderUncertain) as e:
+            raise ValueError(str(e)) from e
         if after:
             await self._notify_exit(after, ExitAction(1.0, "MANUAL", "MARKET", price))
         return after is not None
@@ -430,11 +541,12 @@ class BotRunner:
         while True:
             await asyncio.sleep(60)
             try:
-                prices = dict(self.feed.prices)
+                prices = self.price_map()
+                await self.service.refresh_exchange_cash()
                 equity, cash, _ = await self.service.equity(prices)
                 await self.service.roll_day(equity)  # gece yarısı (İstanbul) gün başı özkaynağı kaydedilir
                 async with self.db.session() as ses:
-                    ses.add(EquitySnapshot(equity=equity, cash=cash))
+                    ses.add(EquitySnapshot(equity=equity, cash=cash, mode=self.service.mode))
                     await ses.commit()
                 await self._update_outcomes(prices)
                 if time.time() - last_prune > 86400:

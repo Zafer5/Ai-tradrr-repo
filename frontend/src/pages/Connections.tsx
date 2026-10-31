@@ -53,7 +53,8 @@ export default function Connections() {
         <KeyForm title="Binance Spot Testnet — Aşama 2" icon={<FlaskConical />} status={d.testnet} hint="Sanal paralı test borsası" saveUrl="/connections/testnet" testUrl="/connections/testnet/test" delUrl="/connections/testnet" reload={reload}
           notice={<>Yalnızca <b>Testnet</b> anahtarı girin (testnet.binance.vision). Gerçek hesap anahtarınızı buraya girmeyin. {d.testnet.stage}</>} />
       </div>
-      <Card title="Gerçek hesap — Aşama 3" icon={<Lock />} actions={<Badge kind="bad">KİLİTLİ</Badge>}><p className="small muted">{d.live.message}</p></Card>
+      <KeyForm title="Binance GERÇEK hesap — alım-satım" icon={<Lock />} status={d.live} hint={d.live.active ? "Şu an gerçek mod AKTİF" : d.live.server_allowed ? "Sunucu gerçek işleme izin veriyor" : "Sunucuda gerçek işlem kilitli (ALLOW_LIVE_TRADING)"} saveUrl="/connections/live" testUrl="/connections/live/test" delUrl="/connections/live" reload={reload}
+        notice={<>Binance → API Yönetimi: <b>yalnızca "Enable Spot &amp; Margin Trading"</b> seçin. <b>"Enable Withdrawals" KAPALI olmalı</b> (açıksa sistem anahtarı reddeder). Anahtarı <b>sunucunuzun IP adresiyle</b> kısıtlayın. Anahtar kaydetmek işlem başlatmaz; gerçek mod ayrıca <a href="#/mode" style={{ color: "var(--accent)" }}>İşlem Modu</a> ekranında onaylanır.</>} />
     </>
   );
 }

@@ -9,7 +9,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import func, select
 
-from ..config import LIVE_TRADING_AVAILABLE
 from ..exchange.binance import BinanceClient, ExchangeError
 from ..logging_setup import register_secret
 from ..models import AnalysisLog, ApiCredential, EquitySnapshot, LogEntry, Order, Position, utcnow
@@ -66,7 +65,7 @@ def pos_dict(p: Position, price: float | None, s) -> dict:
 
 
 async def account_summary(c) -> dict:
-    prices = dict(c.feed.prices)
+    prices = c.bot.price_map()
     equity, cash, open_value = await c.service.equity(prices)
     acc = await c.service.account()
     start = await c.service.roll_day(equity)
@@ -124,7 +123,8 @@ def _bot_status(c) -> dict:
     b = c.bot
     return {
         "enabled": b.enabled, "emergency": b.emergency, "emergency_reason": b.emergency_reason,
-        "safe_mode": b.safe_reason, "mode": "paper", "live_available": LIVE_TRADING_AVAILABLE,
+        "safe_mode": b.safe_reason, "mode": c.service.mode, "mode_label": c.service.mode_label,
+        "live_available": c.cfg.allow_live_trading, "halt": b.halt_reason,
     }
 
 
@@ -151,14 +151,15 @@ async def status(request: Request):
 async def dashboard(request: Request):
     c = ctx(request)
     s = await c.store.get()
-    prices = dict(c.feed.prices)
+    prices = c.bot.price_map()
     async with c.db.session() as ses:
-        open_pos = list((await ses.execute(select(Position).where(Position.status == "OPEN").order_by(Position.id))).scalars())
-        recent = list((await ses.execute(select(Position).where(Position.status == "CLOSED").order_by(Position.closed_at.desc()).limit(8))).scalars())
-        trades_today = (await ses.execute(select(func.count(Position.id)).where(Position.opened_at >= day_start_utc()))).scalar_one()
-        fees_total = (await ses.execute(select(func.coalesce(func.sum(Order.fee), 0.0)))).scalar_one()
-        today_pos = list((await ses.execute(select(Position).where(Position.closed_at >= day_start_utc()))).scalars())
-        snaps = list((await ses.execute(select(EquitySnapshot).order_by(EquitySnapshot.id.desc()).limit(240))).scalars())
+        mode = c.service.mode
+        open_pos = list((await ses.execute(select(Position).where(Position.status == "OPEN", Position.mode == mode).order_by(Position.id))).scalars())
+        recent = list((await ses.execute(select(Position).where(Position.status == "CLOSED", Position.mode == mode).order_by(Position.closed_at.desc()).limit(8))).scalars())
+        trades_today = (await ses.execute(select(func.count(Position.id)).where(Position.opened_at >= day_start_utc(), Position.mode == mode))).scalar_one()
+        fees_total = (await ses.execute(select(func.coalesce(func.sum(Order.fee), 0.0)).where(Order.mode == mode))).scalar_one()
+        today_pos = list((await ses.execute(select(Position).where(Position.closed_at >= day_start_utc(), Position.mode == mode))).scalars())
+        snaps = list((await ses.execute(select(EquitySnapshot).where(EquitySnapshot.mode == mode).order_by(EquitySnapshot.id.desc()).limit(240))).scalars())
     realized_today = sum(p.realized_pnl for p in today_pos)
     top = sorted((a for a in c.bot.analyses.values() if a.eligible and not a.held), key=lambda a: -a.score)[:6]
     return {
@@ -263,13 +264,17 @@ async def ai_performance(request: Request):
 async def positions(request: Request):
     c = ctx(request)
     s = await c.store.get()
-    prices = dict(c.feed.prices)
+    prices = c.bot.price_map()
     return {"items": [pos_dict(p, prices.get(p.symbol), s) for p in await c.service.open_positions()]}
 
 
 @router.post("/positions/{pid}/close", dependencies=[Depends(require_auth)])
 async def close_position(pid: int, request: Request):
-    if not await ctx(request).bot.close_position_manually(pid):
+    try:
+        ok = await ctx(request).bot.close_position_manually(pid)
+    except ValueError as e:
+        raise HTTPException(409, f"Pozisyon kapatılamadı: {e}")
+    if not ok:
         raise HTTPException(409, "Pozisyon kapatılamadı (bulunamadı veya güncel fiyat yok).")
     return {"ok": True}
 
@@ -306,20 +311,20 @@ async def trades(request: Request, limit: int = 100, offset: int = 0, status: st
     c = ctx(request)
     s = await c.store.get()
     limit = max(1, min(limit, 500))
-    q = select(Position).order_by(Position.id.desc()).limit(limit).offset(offset)
+    q = select(Position).where(Position.mode == c.service.mode).order_by(Position.id.desc()).limit(limit).offset(offset)
     if status in ("OPEN", "CLOSED"):
         q = q.where(Position.status == status)
     async with c.db.session() as ses:
         rows = list((await ses.execute(q)).scalars())
-        total = (await ses.execute(select(func.count(Position.id)))).scalar_one()
-    prices = dict(c.feed.prices)
+        total = (await ses.execute(select(func.count(Position.id)).where(Position.mode == c.service.mode))).scalar_one()
+    prices = c.bot.price_map()
     return {"items": [pos_dict(p, prices.get(p.symbol), s) for p in rows], "total": total}
 
 
 @router.get("/orders", dependencies=[Depends(require_auth)])
 async def orders(request: Request, limit: int = 100):
     async with ctx(request).db.session() as ses:
-        rows = list((await ses.execute(select(Order).order_by(Order.id.desc()).limit(max(1, min(limit, 500))))).scalars())
+        rows = list((await ses.execute(select(Order).where(Order.mode == ctx(request).service.mode).order_by(Order.id.desc()).limit(max(1, min(limit, 500))))).scalars())
     return {"items": [{"id": o.id, "position_id": o.position_id, "symbol": o.symbol, "side": o.side, "type": o.order_type,
                        "quantity": o.quantity, "price": o.price, "fee": o.fee, "reason": o.reason,
                        "reason_tr": "Alım" if o.reason == "ENTRY" else REASON_TR.get(o.reason, o.reason),
@@ -331,9 +336,9 @@ async def orders(request: Request, limit: int = 100):
 async def report_pnl(request: Request):
     c = ctx(request)
     async with c.db.session() as ses:
-        closed = list((await ses.execute(select(Position).where(Position.status == "CLOSED").order_by(Position.closed_at))).scalars())
-        fees = (await ses.execute(select(func.coalesce(func.sum(Order.fee), 0.0)))).scalar_one()
-        snaps = list((await ses.execute(select(EquitySnapshot.equity).order_by(EquitySnapshot.id).limit(50000))).scalars())
+        closed = list((await ses.execute(select(Position).where(Position.status == "CLOSED", Position.mode == c.service.mode).order_by(Position.closed_at))).scalars())
+        fees = (await ses.execute(select(func.coalesce(func.sum(Order.fee), 0.0)).where(Order.mode == c.service.mode))).scalar_one()
+        snaps = list((await ses.execute(select(EquitySnapshot.equity).where(EquitySnapshot.mode == c.service.mode).order_by(EquitySnapshot.id).limit(50000))).scalars())
     pnls = [p.realized_pnl for p in closed]
     wins, losses = [x for x in pnls if x > 0], [x for x in pnls if x <= 0]
     gp, gl = sum(wins), -sum(losses)
@@ -396,7 +401,7 @@ async def reset_settings(request: Request):
 async def risk_state(request: Request):
     c = ctx(request)
     s = await c.store.get()
-    snap = await c.service.snapshot(dict(c.feed.prices), set(), s.cooldown_minutes)
+    snap = await c.service.snapshot(c.bot.price_map(), set(), s.cooldown_minutes)
     exposure_pct = snap.exposure / snap.equity * 100 if snap.equity else 0.0
     return {
         "equity": snap.equity, "exposure": snap.exposure, "exposure_pct": exposure_pct,
@@ -408,7 +413,8 @@ async def risk_state(request: Request):
         "usage": {"day_pnl_pct": snap.day_pnl_pct, "open_positions": len(snap.open_positions), "trades_today": snap.trades_today},
         "halted_buys": snap.day_pnl_pct <= -s.daily_loss_limit_pct,
         "fixed_rules": ["Kaldıraç kapalı", "Vadeli işlemler kapalı", "Yalnızca Spot, yalnızca alış (long) yönlü",
-                        "Gerçek para modu bu sürümde kod düzeyinde kilitli", "Belirsiz API durumunda yeni emir gönderilmez"],
+                        "Gerçek emir için sunucu kilidi + panelde yazılı onay gerekir", "Para çekme yetkisi olan anahtar reddedilir",
+                        "Belirsiz API/emir durumunda yeni emir gönderilmez"],
         "safe_mode": c.bot.safe_reason, "emergency": c.bot.emergency,
     }
 
@@ -422,6 +428,8 @@ async def paper_reset(body: ResetBody, request: Request):
     c = ctx(request)
     if not body.confirm:
         raise HTTPException(422, "Onay gerekli.")
+    if c.service.is_exchange:
+        raise HTTPException(409, "Sanal hesap yalnızca SANAL modda sıfırlanabilir.")
     if c.bot.enabled:
         raise HTTPException(409, "Önce botu durdurun.")
     await c.service.reset_account(await c.store.get())
@@ -448,8 +456,9 @@ async def connections(request: Request):
                         "last_error": c.client.last_error, "needs_key": False},
         "testnet": {"configured": bool(t), "key_hint": t.key_hint if t else None, "updated_at": iso(t.updated_at) if t else None,
                     "stage": "Aşama 2: anahtar kaydı ve bağlantı testi hazır; Testnet ile otomatik emir bu sürümde henüz bağlı değil."},
-        "live": {"configured": False, "locked": True,
-                 "message": "Gerçek hesap modu bu sürümde kilitlidir. Yalnızca siz ayrıca onay verdikten sonra açılacaktır."},
+        "live": {"configured": bool(creds.get("live")), "key_hint": creds["live"].key_hint if creds.get("live") else None,
+                 "updated_at": iso(creds["live"].updated_at) if creds.get("live") else None,
+                 "server_allowed": c.cfg.allow_live_trading, "active": c.service.mode == "live"},
     }
 
 
