@@ -212,6 +212,9 @@ async def delete_keys():
     return {"configured": False}
 
 
+_CHART_CACHE: dict = {}
+
+
 def _nn(v):
     return None if v is None or v != v else round(v, 10)
 
@@ -225,10 +228,18 @@ async def chart(symbol: str, interval: str = "15m", limit: int = 120):
     if interval not in ("5m", "15m", "1h", "4h") or not re.fullmatch(r"[A-Z0-9]{5,20}", symbol):
         raise HTTPException(400, "Geçersiz coin veya zaman dilimi")
     limit = max(30, min(limit, 200))
-    try:
-        candles = await e.client.klines(symbol, interval, 250)
-    except Exception as ex:  # noqa: BLE001
-        raise HTTPException(502, f"Grafik verisi alınamadı: {ex}")
+    import time as _t
+    hit = _CHART_CACHE.get((symbol, interval))
+    if hit and _t.time() - hit[0] < 2.0:       # birden çok istek borsayı yormasın
+        candles = hit[1]
+    else:
+        try:
+            candles = await e.client.klines(symbol, interval, 250)
+        except Exception as ex:  # noqa: BLE001
+            raise HTTPException(502, f"Grafik verisi alınamadı: {ex}")
+        _CHART_CACHE[(symbol, interval)] = (_t.time(), candles)
+        if len(_CHART_CACHE) > 50:
+            _CHART_CACHE.pop(next(iter(_CHART_CACHE)))
     closes = [c.close for c in candles]
     e21, e50 = ind.ema(closes, 21), ind.ema(closes, 50)
     cut = len(candles) - limit
@@ -249,6 +260,7 @@ async def chart(symbol: str, interval: str = "15m", limit: int = 120):
         "markers": markers,
         "position": {"entry": pos.entry_price, "take_profit": pos.take_profit, "stop_loss": pos.stop_loss} if pos else None,
         "analysis": e.latest[symbol].to_dict() if symbol in e.latest else None,
+        "server_time": _t.time(),
     }
 
 

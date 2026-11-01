@@ -90,7 +90,7 @@ V.live = async () => {
     <div class="small">${esc(i.text)}</div></div><span class="small">${t(i.at)}</span></div>`).join("") || "Henüz kayıt yok. Botu başlatınca burada kararlarını göreceksin."}</div>`;
 };
 
-let chartSym = null, chartTf = "15m";
+let chartSym = null, chartTf = "15m", chartTimer = null;
 function drawChart(d) {
   const W = 600, H = 340, PL = 6, PR = 62, PT = 8, PB = 18, VH = 50;
   const cs = d.candles;
@@ -144,15 +144,35 @@ V.chart = async () => {
   const syms = [...new Set([...po.map(p => p.symbol), ...sc.coins.map(c => c.symbol)])];
   if (!syms.length) return `<div class="card">Coin listesi henüz hazır değil. Birkaç dakika sonra tekrar bak.</div>`;
   if (!chartSym || !syms.includes(chartSym)) chartSym = syms[0];
-  const d = await api(`/api/chart/${chartSym}?interval=${chartTf}`);
-  const a = d.analysis;
+  setTimeout(chartTick, 0);
   return `<div class="card"><select id="csym" onchange="chartSym=this.value.split(' ')[0];load()" style="width:100%;padding:10px;border-radius:8px;background:var(--bg);color:var(--text);border:1px solid var(--line);font-size:15px">
     ${syms.map(s => `<option ${s === chartSym ? "selected" : ""}>${s}${po.some(p => p.symbol === s) ? "  ● açık pozisyon" : ""}</option>`).join("")}</select>
     <div style="display:flex;gap:6px;margin-top:8px">${["5m", "15m", "1h", "4h"].map(t => `<button class="btn ${t === chartTf ? "" : "grey"}" style="margin:0;padding:8px" onclick="chartTf='${t}';load()">${t}</button>`).join("")}</div></div>
-  ${drawChart(d)}
-  ${a ? `<div class="card" style="margin-top:10px"><div class="row"><b>Botun puanı</b><span class="score ${scoreCls(a.score)}">${a.score} · ${esc(a.label)}</span></div>
-    ${a.reasons.length ? `<ul>${a.reasons.map(r => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}${a.warnings.length ? `<ul class="neg">${a.warnings.map(r => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}</div>` : ""}`;
+  <div id="chartlive" class="small" style="margin:4px 2px">Canlı veri bağlanıyor…</div>
+  <div id="chartbox"></div><div id="chartinfo"></div>`;
 };
+
+let chartBusy = false;
+async function chartTick() {
+  if (tab !== "chart" || chartBusy || !$("#chartbox")) return;
+  chartBusy = true;
+  try {
+    const d = await api(`/api/chart/${chartSym}?interval=${chartTf}`);
+    if (tab !== "chart" || !$("#chartbox")) return;
+    $("#chartbox").innerHTML = drawChart(d);
+    const last = d.candles[d.candles.length - 1], first = d.candles[0];
+    const chg = (last.c / last.o - 1) * 100;
+    $("#chartlive").innerHTML = `<span class="pos">● CANLI</span> · ${esc(d.symbol)} <b>${px(last.c)}</b> (bu mum ${pnl(chg)}%) · ${new Date().toLocaleTimeString("tr-TR")} · 3 sn'de bir güncellenir`;
+    const a = d.analysis;
+    $("#chartinfo").innerHTML = a ? `<div class="card" style="margin-top:10px"><div class="row"><b>Botun puanı</b><span class="score ${scoreCls(a.score)}">${a.score} · ${esc(a.label)}</span></div>
+      ${a.reasons.length ? `<ul>${a.reasons.map(r => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}${a.warnings.length ? `<ul class="neg">${a.warnings.map(r => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}</div>` : "";
+  } catch (e) {
+    if ($("#chartlive")) $("#chartlive").innerHTML = `<span class="neg">● Bağlantı sorunu: ${esc(e.message)}</span> (yeniden deneniyor)`;
+  } finally {
+    chartBusy = false;
+    if (tab === "chart") { clearTimeout(chartTimer); chartTimer = setTimeout(chartTick, 3000); }
+  }
+}
 
 V.radar = async () => {
   const d = await api("/api/radar");
@@ -277,10 +297,10 @@ V.logs = async () => {
 };
 
 async function load() {
-  clearTimeout(timer);
+  clearTimeout(timer); clearTimeout(chartTimer);
   try { $("#view").innerHTML = await V[tab](); if (tab !== "home") updateBadge(); }
   catch (e) { $("#view").innerHTML = `<div class="card neg">${esc(e.message)}</div>`; }
-  if (!["settings", "risk", "api"].includes(tab)) timer = setTimeout(load, tab === "live" ? 5000 : 10000);
+  if (!["settings", "risk", "api", "chart"].includes(tab)) timer = setTimeout(load, tab === "live" ? 5000 : 10000);
 }
 
 async function act(path, body) {
