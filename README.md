@@ -3,7 +3,8 @@
 Binance Spot piyasasını tarayan, teknik analizle fırsatları puanlayan, bağımsız risk
 kontrolünden geçirip **sanal (paper) işlem** yapan bot ve telefondan kullanılan Türkçe panel.
 
-> ⚠️ Bu sürüm **yalnızca sanal işlem** yapar. Gerçek para ile emir gönderen kod yoktur.
+> ⚠️ Varsayılan mod **sanal işlemdir** (`TRADING_MODE=paper`). Testnet ve gerçek para modları vardır
+> ama kilitlidir: önce [GERCEK_PARA_REHBERI.md](GERCEK_PARA_REHBERI.md) dosyasını okuyun.
 > Hiçbir strateji kâr garantisi vermez; puanlar yalnızca olasılık tahminidir.
 
 ## Mimari
@@ -25,6 +26,8 @@ risk.py      ── bağımsız risk kontrolü: %1 risk, %2 günlük zarar, 5 po
         │
         ▼
 paper.py     ── sanal emir (komisyon + fiyat kayması simülasyonu)
+live.py      ── Binance Testnet / gerçek hesap emirleri (kilitli; exchanges/binance_trade.py)
+radar.py     ── yeni listelenen ve ilgi gören coinleri izleme listesi (Binance + CoinGecko, ücretsiz)
         │
 engine.py    ── döngüler: coin listesi (30 dk), analiz (5 dk), pozisyon takibi (5 sn: hedef, stop, iz süren stop, kademeli satış)
         │

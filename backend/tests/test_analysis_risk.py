@@ -92,11 +92,11 @@ def test_round_step():
     assert round_step(0.3, 0.1) == 0.3
 
 
-def test_paper_fees_and_slippage():
+async def test_paper_fees_and_slippage():
     ex = PaperExecutor(0.1, 0.05)
-    b = ex.market_buy(100.0, 1.0)
-    assert abs(b.price - 100.05) < 1e-9 and abs(b.fee - 0.10005) < 1e-9
-    s = ex.market_sell(100.0, 1.0)
+    b = await ex.buy("AAAUSDT", 100.0, 1.0)
+    assert abs(b.price - 100.05) < 1e-9 and abs(b.fee - 0.10005) < 1e-9 and b.fee_cash == b.fee
+    s = await ex.sell("AAAUSDT", 100.0, 1.0)
     assert abs(s.price - 99.95) < 1e-9
     # aynı fiyattan al-sat zarar ettirir (komisyon + kayma)
     assert ex.net_if_sold(100.0, 1.0, b.notional + b.fee) < 0

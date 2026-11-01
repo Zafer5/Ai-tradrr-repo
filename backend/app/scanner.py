@@ -24,6 +24,8 @@ class ScanFilters:
     min_trade_count: int = 5_000            # 24 saatte en az işlem sayısı
     exclude_stablecoins: bool = True
     exclude_leveraged: bool = True
+    include_radar: bool = False             # Radar'daki en iyi birkaç eski coini de analiz et (yeni listelenenler hariç)
+    radar_extra: int = 5
 
 
 @dataclass

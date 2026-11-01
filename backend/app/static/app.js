@@ -1,6 +1,6 @@
 "use strict";
 const TABS = [
-  ["home", "Ana Sayfa"], ["live", "Canlı"], ["chart", "Grafik"], ["scanner", "Tarayıcı"], ["ai", "Analizler"], ["positions", "Pozisyonlar"],
+  ["home", "Ana Sayfa"], ["live", "Canlı"], ["chart", "Grafik"], ["radar", "Radar"], ["scanner", "Tarayıcı"], ["ai", "Analizler"], ["positions", "Pozisyonlar"],
   ["history", "Geçmiş"], ["report", "Kâr-Zarar"], ["settings", "Bot Ayarları"], ["risk", "Risk"],
   ["api", "Bağlantılar"], ["logs", "Günlükler"],
 ];
@@ -32,6 +32,11 @@ async function updateBadge() {
     const b = $("#botBadge");
     b.textContent = s.emergency_stop ? "ACİL DURDU" : s.running ? "Bot açık" : "Bot kapalı";
     b.className = "badge " + (s.running && !s.emergency_stop ? "on" : "off");
+    const m = $("#modeBadge");
+    m.textContent = s.mode === "live" ? "GERÇEK PARA" : s.mode === "testnet" ? "TESTNET" : "SANAL İŞLEM";
+    m.className = "badge " + (s.mode === "live" ? "off" : "");
+    if (s.mode === "live") m.style.fontWeight = "700";
+    window.MODE = s.mode;
     return s;
   } catch (e) { return null; }
 }
@@ -42,6 +47,7 @@ V.home = async () => {
   if (!s) return `<div class="card">Sunucuya ulaşılamadı.</div>`;
   const stat = (k, v) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`;
   return `
+  ${s.mode === "live" ? `<div class="notice" style="border-color:var(--red);background:rgba(255,92,92,.1)"><b>GERÇEK PARA MODU.</b> Bot gerçek hesabınızla alım-satım yapar ve para kaybedebilirsiniz. Acil durdurma düğmesi aşağıdadır.</div>` : ""}
   ${s.halted_reason ? `<div class="notice">⚠ ${esc(s.halted_reason)}</div>` : ""}
   ${s.last_error ? `<div class="notice">Son hata: ${esc(s.last_error)}</div>` : ""}
   <div class="grid">
@@ -62,7 +68,7 @@ V.home = async () => {
       ? `<button class="btn grey" onclick="act('/api/bot/emergency',{active:false})">Acil durdurmayı kaldır</button>`
       : s.running
         ? `<button class="btn grey" onclick="act('/api/bot/run',{running:false})">Botu durdur</button>`
-        : `<button class="btn green" onclick="act('/api/bot/run',{running:true})">Botu başlat (sanal)</button>`}
+        : `<button class="btn green" onclick="startBot()">Botu başlat (${esc(s.mode_label || "sanal")})</button>`}
     <button class="btn red" onclick="emergency()">ACİL DURDUR</button>
   </div>
   <h2>En iyi fırsatlar</h2>
@@ -148,6 +154,18 @@ V.chart = async () => {
     ${a.reasons.length ? `<ul>${a.reasons.map(r => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}${a.warnings.length ? `<ul class="neg">${a.warnings.map(r => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}</div>` : ""}`;
 };
 
+V.radar = async () => {
+  const d = await api("/api/radar");
+  const tagc = t => `<span class="badge" style="margin:2px 2px 0 0">${esc(t)}</span>`;
+  return `<div class="notice"><b>${esc(d.note)}</b><br>Bot Radar'daki coinlere kendiliğinden girmez. Yalnızca izleme içindir. Trend verisi: ${esc(d.trending_source)}.</div>
+  <div class="small">Güncelleme: ${ago(d.updated_at)}</div>
+  ${d.items.map(r => `<div class="card"><div class="row"><b>${esc(r.symbol)}</b><span><span class="small">İvme puanı</span> <span class="score ${scoreCls(r.score)}">${r.score}</span></span></div>
+    <div class="small">Fiyat ${px(r.price)} · 24s ${pnl(r.change_24h)}% · hacim ${num(r.quote_volume / 1e6, 1)} M$ (${r.vol_ratio}× ortalama)${r.age_days != null ? ` · ${r.age_days} günlük` : ""}</div>
+    <div>${r.tags.map(tagc).join("")}</div>
+    ${r.warnings.length ? `<ul class="neg">${r.warnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul>` : ""}
+    <button class="btn grey" style="margin-top:6px;padding:8px" onclick="chartSym='${r.symbol}';tab='chart';renderNav();load()">Grafiği aç</button></div>`).join("") || `<div class="card">Radar henüz hazır değil. Bot açıldıktan 1-2 dakika sonra tekrar bak.</div>`}`;
+};
+
 V.scanner = async () => {
   const d = await api("/api/scanner");
   return `<div class="small">Güncelleme: ${ago(d.updated_at)} · ${d.coins.length} coin seçildi, ${d.rejected} coin elendi</div>
@@ -228,22 +246,29 @@ V.risk = () => form("risk");
 V.api = async () => {
   const [c, k] = await Promise.all([api("/api/connections"), api("/api/keys")]);
   const row = (a, v) => `<div class="row"><span>${a}</span><b style="text-align:right">${esc(v)}</b></div>`;
+  const paper = c.mode === "paper";
   const saved = k.configured
-    ? (k.readable ? `<div class="notice" style="border-color:var(--green)">Kayıtlı Testnet anahtarı: <b>${esc(k.api_key_masked)}</b><br>Secret şifreli saklanıyor ve bir daha gösterilmez.</div>
+    ? (k.readable ? `<div class="notice" style="border-color:var(--green)">Kayıtlı ${esc(k.environment)} anahtarı: <b>${esc(k.api_key_masked)}</b><br>Secret şifreli saklanıyor ve bir daha gösterilmez.</div>
        <button class="btn grey" onclick="delKey()">Kayıtlı anahtarı sil</button>`
       : `<div class="notice">${esc(k.note)}</div><button class="btn grey" onclick="delKey()">Kayıtlı anahtarı sil</button>`)
     : "";
-  return `<div class="card">${row("Borsa", c.exchange)}${row("Mod", "Paper Trading (sanal)")}${row("Piyasa verisi", c.market_data)}
-    ${row("Canlı fiyat akışı", c.websocket_connected ? "Bağlı" : "Bağlı değil")}${row("Gerçek işlem", c.live_trading)}</div>
-  <h2>Binance Testnet API anahtarı</h2>
+  const chk = c.exchange_check;
+  const checks = chk ? `<div class="card">${chk.checks.map(x => `<div class="row"><span>${x.ok ? "✅" : "❌"} ${esc(x.text)}</span></div>`).join("")}
+      ${(chk.warnings || []).map(w => `<div class="notice">${esc(w)}</div>`).join("")}</div>` : "";
+  const lim = c.live_limits ? `${row("Bot bütçesi (azami)", c.live_limits.budget_usdt + " USDT")}${row("Tek alım üst sınırı", c.live_limits.max_order_usdt + " USDT")}` : "";
+  return `<div class="card">${row("Borsa", c.exchange)}${row("Mod", c.mode_label)}${row("Piyasa verisi", c.market_data)}
+    ${row("Canlı fiyat akışı", c.websocket_connected ? "Bağlı" : "Bağlı değil")}${row("Gerçek işlem", c.live_trading)}${lim}</div>
+  ${paper ? `<div class="notice">Sanal modda API anahtarı <b>gerekmez</b>. Testnet veya gerçek mod için sunucudaki .env dosyasında TRADING_MODE değiştirilir.</div>` : `
+  <h2>Binance API anahtarı (${esc(c.mode_label)})</h2>
   <div class="card">
-    <div class="notice">Sanal (paper) işlem için anahtar <b>gerekmez</b>. Bu form bir sonraki aşama olan Binance Testnet içindir. Anahtar şimdilik kaydedilir ama bot onu kullanmaz.<br>
-    Yalnızca <b>testnet.binance.vision</b> adresinden aldığın anahtarı gir. <b>Gerçek hesap anahtarı girme</b> (kabul edilmez). Para çekme izni olmamalı.</div>
+    <div class="notice">Anahtarı Binance'te <b>sadece "Spot alım-satım"</b> iznine sahip olacak şekilde oluşturun. <b>Para çekme izni KAPALI</b> olmalı; açıksa bot gerçek modda çalışmayı reddeder. Anahtarı ayrıca bu bilgisayarın IP adresine kısıtlamanız önerilir.</div>
     ${saved}
     <label>API Key</label><input type="password" id="ak" autocomplete="off" style="width:100%;padding:10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--text)">
     <label>Secret Key</label><input type="password" id="as" autocomplete="off" style="width:100%;padding:10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--text)">
     <button class="btn" onclick="saveKey()">Şifreli kaydet</button>
-  </div>`;
+    <button class="btn grey" onclick="verifyEx()">Güvenlik kontrolünü çalıştır</button>
+  </div>
+  <h2>Son güvenlik kontrolü</h2>${checks || '<div class="card small">Henüz çalıştırılmadı.</div>'}`}`;
 };
 
 V.logs = async () => {
@@ -261,6 +286,15 @@ async function load() {
 async function act(path, body) {
   try { await api(path, {method: "POST", body: JSON.stringify(body)}); } catch (e) { alert(e.message); }
   load();
+}
+function startBot() {
+  const body = {running: true};
+  if (window.MODE === "live") {
+    const t = prompt("GERÇEK PARA ile işlem başlayacak. Para kaybedebilirsiniz.\nDevam etmek için ONAYLIYORUM yazın:");
+    if (t == null) return;
+    body.confirm = t;
+  }
+  act("/api/bot/run", body);
 }
 function emergency() {
   if (!confirm("Acil durdurma: yeni alımlar durur. Devam?")) return;
@@ -282,9 +316,13 @@ async function saveSettings() {
 }
 
 async function saveKey() {
-  const body = {environment: "testnet", api_key: $("#ak").value, api_secret: $("#as").value};
+  const body = {environment: window.MODE || "testnet", api_key: $("#ak").value, api_secret: $("#as").value};
   try { await api("/api/keys", {method: "PUT", body: JSON.stringify(body)}); $("#ak").value = $("#as").value = ""; alert("Kaydedildi (şifreli)."); }
   catch (e) { alert("Kaydedilemedi: " + e.message); return; }
+  load();
+}
+async function verifyEx() {
+  try { await api("/api/exchange/verify", {method: "POST"}); } catch (e) { alert(e.message); }
   load();
 }
 async function delKey() {

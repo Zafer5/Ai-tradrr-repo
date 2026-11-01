@@ -13,22 +13,48 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from .config import settings
+from .config import TESTNET_REST, settings
 from . import indicators as ind
 from .db import AnalysisRecord, Database, LogEntry, Position, Trade
 from .engine import Engine
 from .exchanges.binance import BinanceClient, BinancePriceStream
+from .exchanges.binance_trade import BinanceTrader
 from .secrets_store import KeyStore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 STATIC = Path(__file__).parent / "static"
 
 
+def keystore() -> KeyStore:
+    import os
+    path = settings.db_url.split(":///", 1)[-1]
+    return KeyStore(os.path.dirname(os.path.abspath(path)) or ".", settings.panel_password)
+
+
+def make_trader() -> BinanceTrader | None:
+    """Kayıtlı (şifreli) anahtarlardan işlem istemcisi üretir. Anahtar ya da mod uyuşmuyorsa None."""
+    if settings.trading_mode == "paper":
+        return None
+    d = keystore().load()
+    if not d or d.get("environment") != settings.trading_mode:
+        return None
+    url = TESTNET_REST if settings.trading_mode == "testnet" else settings.binance_rest_url
+    return BinanceTrader(url, d["api_key"], d["api_secret"])
+
+
 def build_engine() -> Engine:
-    db = Database(settings.database_url)
-    client = BinanceClient(settings.binance_rest_url)
-    engine = Engine(client, db, settings.starting_balance)
-    engine.stream = BinancePriceStream(settings.binance_ws_url, engine.on_price)
+    db = Database(settings.db_url)
+    mode = settings.trading_mode
+    rest = TESTNET_REST if mode == "testnet" else settings.binance_rest_url
+    client = BinanceClient(rest)
+    engine = Engine(client, db, settings.effective_starting_balance, mode=mode, trader=make_trader(),
+                    max_order_usdt=settings.live_max_order_usdt if mode == "live" else 0.0,
+                    budget=settings.live_budget_usdt if mode == "live" else 0.0)
+    if mode == "testnet":   # Testnet'te hacim çok düşüktür; süzgeçleri gevşet (yalnızca emir akışını denemek için)
+        sc = engine.settings.scan
+        sc.min_quote_volume, sc.max_spread_pct, sc.min_trade_count = 0.0, 5.0, 0
+    if mode != "testnet":
+        engine.stream = BinancePriceStream(settings.binance_ws_url, engine.on_price)
     return engine
 
 
@@ -40,11 +66,13 @@ async def lifespan(app: FastAPI):
     await engine.init()
     if getattr(app.state, "background", True):
         engine.start_background()
-    await engine.log("INFO", "AI KRİPTO TRADER başladı (mod: PAPER - sanal işlem)")
+    await engine.log("INFO", f"AI KRİPTO TRADER başladı (mod: {engine.label})")
     yield
     await engine.shutdown()
     await engine.client.close()
     await engine.db.dispose()
+    if engine.trader is not None:
+        await engine.trader.close()
 
 
 app = FastAPI(title="AI KRİPTO TRADER", lifespan=lifespan)
@@ -145,12 +173,6 @@ async def put_settings(data: dict):
     return eng().settings.to_dict()
 
 
-def keystore() -> KeyStore:
-    import os
-    path = settings.database_url.split(":///", 1)[-1]
-    return KeyStore(os.path.dirname(os.path.abspath(path)) or ".", settings.panel_password)
-
-
 class KeyBody(BaseModel):
     environment: str = "testnet"
     api_key: str
@@ -164,19 +186,28 @@ async def get_keys():
 
 @app.put("/api/keys", dependencies=[Depends(auth)])
 async def put_keys(b: KeyBody):
-    if b.environment != "testnet":
-        raise HTTPException(400, "Bu sürümde yalnızca Binance Testnet anahtarı kaydedilebilir. Gerçek hesap anahtarı kabul edilmez.")
+    if settings.trading_mode == "paper":
+        raise HTTPException(400, "Sanal modda API anahtarı gerekmez ve kaydedilmez. Anahtar için .env dosyasında TRADING_MODE=testnet yapın.")
+    if b.environment != settings.trading_mode:
+        raise HTTPException(400, f"Bot şu an '{settings.trading_mode}' modunda; yalnızca bu moda ait anahtar kaydedilebilir.")
     k, sec = b.api_key.strip(), b.api_secret.strip()
     if not (16 <= len(k) <= 128) or not (16 <= len(sec) <= 128) or " " in k or " " in sec:
         raise HTTPException(400, "Anahtar veya secret geçersiz görünüyor. Kopyalarken boşluk kalmış olabilir.")
     keystore().save(b.environment, k, sec)
-    await eng().log("INFO", "Testnet API anahtarı kaydedildi (şifreli). Değer günlüğe yazılmadı.")
+    old = eng().trader
+    eng().set_trader(make_trader())
+    if old is not None:
+        await old.close()
+    await eng().log("INFO", f"{b.environment} API anahtarı kaydedildi (şifreli). Değer günlüğe yazılmadı.")
     return keystore().public_info()
 
 
 @app.delete("/api/keys", dependencies=[Depends(auth)])
 async def delete_keys():
     keystore().delete()
+    if eng().trader is not None:
+        await eng().trader.close()
+    eng().set_trader(None)
     await eng().log("INFO", "Kayıtlı API anahtarı silindi")
     return {"configured": False}
 
@@ -230,22 +261,39 @@ async def activity(limit: int = 100):
             "tracked": len(e.universe), "items": list(e.decisions)[:limit]}
 
 
+@app.get("/api/radar", dependencies=[Depends(auth)])
+async def get_radar():
+    e = eng()
+    return {"updated_at": e.last_radar_at, "trending_source": "CoinGecko (ücretsiz)" if e.trending else "ulaşılamadı",
+            "items": [r.to_dict() for r in e.radar_items[:60]],
+            "note": "Radar tahmin değildir; yalnızca olağan dışı hareket eden coinleri gösterir. Yeni ve ani yükselen coinler en riskli olanlardır."}
+
+
+@app.post("/api/exchange/verify", dependencies=[Depends(auth)])
+async def exchange_verify():
+    return await eng().verify_exchange()
+
+
 @app.get("/api/connections", dependencies=[Depends(auth)])
 async def connections():
     e = eng()
     return {
         "exchange": "Binance Spot",
-        "mode": "paper",
+        "mode": settings.trading_mode,
+        "mode_label": eng().label,
+        "exchange_check": eng().exchange_check,
+        "live_limits": {"budget_usdt": settings.live_budget_usdt, "max_order_usdt": settings.live_max_order_usdt} if settings.is_live else None,
         "market_data": "Herkese açık piyasa verisi (API anahtarı gerekmez)",
         "websocket_connected": bool(e.stream and e.stream.connected),
         "api_key_configured": keystore().exists(),
-        "live_trading": "Kapalı - bu sürümde gerçek emir gönderme kodu yoktur",
-        "key_note": "Kayıtlı anahtar şimdilik kullanılmıyor; Testnet entegrasyonu bir sonraki aşamada.",
+        "live_trading": "AÇIK (GERÇEK PARA)" if settings.is_live else "Kapalı",
+        "key_note": "Anahtar yalnızca sunucuda şifreli saklanır; tarayıcıya geri gönderilmez.",
     }
 
 
 class RunBody(BaseModel):
     running: bool
+    confirm: str = ""
 
 
 class EmergencyBody(BaseModel):
@@ -256,7 +304,7 @@ class EmergencyBody(BaseModel):
 @app.post("/api/bot/run", dependencies=[Depends(auth)])
 async def bot_run(b: RunBody):
     try:
-        await eng().set_running(b.running)
+        await eng().set_running(b.running, confirmed=(b.confirm.strip().upper() == "ONAYLIYORUM"))
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"running": eng().running}

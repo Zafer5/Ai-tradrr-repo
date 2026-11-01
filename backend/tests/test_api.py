@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import main
-from app.config import settings
+from app.config import LIVE_CONFIRM_TEXT, settings
 from app.db import Database
 from app.engine import Engine
 
@@ -49,15 +49,47 @@ def test_bot_controls(client):
     assert client.post("/api/bot/run", headers=h(), json={"running": True}).status_code == 400
 
 
-def test_live_mode_refused(monkeypatch):
-    monkeypatch.setattr(settings, "trading_mode", "live")
+def test_live_mode_needs_explicit_confirmation(monkeypatch):
     monkeypatch.setattr(settings, "panel_password", "test-sifre-123")
+    monkeypatch.setattr(settings, "trading_mode", "live")
+    monkeypatch.setattr(settings, "live_confirm", "")
+    with pytest.raises(RuntimeError, match="LIVE_CONFIRM"):
+        settings.validate_safety()
+    monkeypatch.setattr(settings, "live_confirm", "evet")
+    with pytest.raises(RuntimeError):
+        settings.validate_safety()
+    monkeypatch.setattr(settings, "live_confirm", LIVE_CONFIRM_TEXT)
+    monkeypatch.setattr(settings, "live_budget_usdt", 5000.0)    # güvenlik sınırının üstü
+    with pytest.raises(RuntimeError):
+        settings.validate_safety()
+    monkeypatch.setattr(settings, "live_budget_usdt", 30.0)
+    monkeypatch.setattr(settings, "live_max_order_usdt", 10.0)
+    settings.validate_safety()
+
+
+def test_paper_mode_rejects_keys_and_unknown_mode(client, monkeypatch):
+    r = client.put("/api/keys", headers=h(), json={"environment": "testnet", "api_key": "A" * 40, "api_secret": "B" * 40})
+    assert r.status_code == 400
+    monkeypatch.setattr(settings, "trading_mode", "bogus")
     with pytest.raises(RuntimeError):
         settings.validate_safety()
 
 
+def test_db_is_separate_per_mode(monkeypatch):
+    monkeypatch.setattr(settings, "trading_mode", "paper")
+    assert settings.db_url.endswith("trader.db")
+    monkeypatch.setattr(settings, "trading_mode", "live")
+    assert settings.db_url.endswith("trader_live.db")
+
+
+def test_radar_endpoint(client):
+    d = client.get("/api/radar", headers=h()).json()
+    assert d["items"] == [] and "tahmin değildir" in d["note"]
+
+
 def test_keys_testnet_only_and_never_returned(client, tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "database_url", f"sqlite+aiosqlite:///{tmp_path}/t.db")
+    monkeypatch.setattr(settings, "trading_mode", "testnet")
     key, sec = "A" * 40, "SECRET" + "B" * 40
     assert client.get("/api/keys", headers=h()).json() == {"configured": False}
     assert client.put("/api/keys", headers=h(), json={"environment": "live", "api_key": key, "api_secret": sec}).status_code == 400

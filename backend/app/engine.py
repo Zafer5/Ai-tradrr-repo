@@ -7,14 +7,17 @@ import logging
 import math
 import time
 from collections import deque
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 
 from sqlalchemy import delete, func, select
 
 from .analysis import TIMEFRAMES, Analysis, Analyzer, TargetSettings
 from .db import Account, AnalysisRecord, Database, LogEntry, Position, SettingsRow, Trade, utcnow
 from .exchanges.base import ExchangeError, MarketDataClient, PriceUpdate, SymbolInfo
+from .exchanges.binance_trade import BinanceTrader, OrderUncertain
+from .live import LiveExecutor
 from .paper import PaperExecutor
+from . import radar as radar_mod
 from .risk import PortfolioState, RiskSettings, evaluate_buy, round_step
 from .scanner import ScanFilters, ScanResult, scan
 
@@ -73,19 +76,40 @@ class BotSettings:
                 raise ValueError(msg)
 
 
+class _NoKeysExecutor(PaperExecutor):
+    """Test/canlı modda API anahtarı yokken: hiçbir emir gönderilmez, sanal emir de yapılmaz."""
+
+    async def buy(self, *a, **k):
+        raise ExchangeError("API anahtarı kayıtlı değil")
+
+    async def sell(self, *a, **k):
+        raise ExchangeError("API anahtarı kayıtlı değil")
+
+
 def today() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
 
 
 class Engine:
-    def __init__(self, client: MarketDataClient, db: Database, starting_balance: float, stream=None):
+    def __init__(self, client: MarketDataClient, db: Database, starting_balance: float, stream=None,
+                 mode: str = "paper", trader: BinanceTrader | None = None, max_order_usdt: float = 0.0, budget: float = 0.0):
+        self.mode = mode
+        self.trader = trader
+        self.max_order_usdt = max_order_usdt   # canlı modda config'ten gelen, panelden aşılamayan üst sınır
+        self.budget = budget
+        self.exchange_check: dict | None = None
+        self.frozen: set[str] = set()
+        self.radar_items: list = []
+        self.last_radar_at = 0.0
+        self.trending: set[str] = set()
         self.client = client
         self.db = db
         self.starting_balance = starting_balance
         self.stream = stream
         self.analyzer = Analyzer()
         self.settings = BotSettings()
-        self.executor = PaperExecutor(self.settings.risk.fee_pct, self.settings.risk.slippage_pct)
+        self.executor = None  # aşağıda set_trader ile belirlenir
+        self.set_trader(trader)
         self.universe: list[ScanResult] = []
         self.rejected_count = 0
         self.symbol_info: dict[str, SymbolInfo] = {}
@@ -119,7 +143,7 @@ class Engine:
         async with self.db.session() as s:
             acc = await s.get(Account, 1)
             if acc is None:
-                acc = Account(id=1, mode="paper", starting_balance=self.starting_balance, cash=self.starting_balance,
+                acc = Account(id=1, mode=self.mode, starting_balance=self.starting_balance, cash=self.starting_balance,
                               day=today(), day_start_equity=self.starting_balance, peak_equity=self.starting_balance)
                 s.add(acc)
             row = await s.get(SettingsRow, "bot")
@@ -135,8 +159,24 @@ class Engine:
             await s.commit()
         self._apply_exec_settings()
 
+    def set_trader(self, trader: BinanceTrader | None) -> None:
+        """Modu ve anahtarlara göre yürütücüyü seçer. Anahtar yoksa test/canlı modda emir gönderilemez."""
+        self.trader = trader
+        r = self.settings.risk
+        if self.mode == "paper":
+            self.executor = PaperExecutor(r.fee_pct, r.slippage_pct)
+        elif trader is None:
+            self.executor = _NoKeysExecutor(r.fee_pct, r.slippage_pct)
+        else:
+            self.executor = LiveExecutor(trader, self.mode, r.fee_pct, r.slippage_pct)
+
     def _apply_exec_settings(self) -> None:
-        self.executor = PaperExecutor(self.settings.risk.fee_pct, self.settings.risk.slippage_pct)
+        self.executor.fee = self.settings.risk.fee_pct / 100
+        self.executor.slip = self.settings.risk.slippage_pct / 100
+
+    @property
+    def label(self) -> str:
+        return {"paper": "SANAL", "testnet": "TESTNET", "live": "GERÇEK PARA"}.get(self.mode, self.mode.upper())
 
     async def save_settings(self, data: dict) -> None:
         new = BotSettings()
@@ -158,6 +198,7 @@ class Engine:
         self._tasks = [
             asyncio.create_task(self._loop("universe", self.refresh_universe, lambda: self.settings.trade.universe_refresh_sec)),
             asyncio.create_task(self._loop("analysis", self.analysis_cycle, lambda: self.settings.trade.analysis_interval_sec, delay=5)),
+            asyncio.create_task(self._loop("radar", self.refresh_radar, lambda: 900, delay=20)),
             asyncio.create_task(self._loop("positions", self.manage_positions, lambda: self.settings.trade.position_check_sec, delay=3)),
         ]
         if self.stream:
@@ -216,6 +257,18 @@ class Engine:
             open_syms = (await s.execute(select(Position.symbol).where(Position.status == "open"))).scalars().all()
         self.stream.set_symbols([u.symbol for u in self.universe] + list(open_syms))
 
+    # ---------- radar ----------
+    async def refresh_radar(self) -> None:
+        symbols, tickers, books = await asyncio.gather(self.client.symbols(), self.client.tickers_24h(), self.client.book_tickers())
+        self.symbol_info.update({x.symbol: x for x in symbols})
+        trending = await radar_mod.fetch_trending()
+        if trending:
+            self.trending = trending
+        self.radar_items = await radar_mod.scan_radar(self.client, symbols, tickers, books, self.trending)
+        self.last_radar_at = time.time()
+        new = [r for r in self.radar_items if r.age_days is not None and r.age_days < 30]
+        await self.log("INFO", f"Radar güncellendi: {len(self.radar_items)} coin incelendi, {len(new)} yeni listelenen")
+
     # ---------- analiz ----------
     async def analyze_symbol(self, symbol: str) -> Analysis:
         results = await asyncio.gather(*(self.client.klines(symbol, tf, 250) for tf in TIMEFRAMES))
@@ -226,6 +279,13 @@ class Engine:
             return
         analyses: list[Analysis] = []
         coins = list(self.universe)
+        if self.settings.scan.include_radar and self.radar_items:
+            have = {u.symbol for u in coins}
+            extra = [r for r in self.radar_items if r.symbol not in have and (r.age_days is None or r.age_days >= 40)
+                     and r.score >= 50 and r.change_24h <= 25][: self.settings.scan.radar_extra]
+            coins += [ScanResult(r.symbol, r.base, r.price, r.change_24h, r.quote_volume, 0.0, 0) for r in extra]
+            if extra:
+                self.note("-", None, "bilgi", "Radar'dan eklenen coinler: " + ", ".join(r.symbol for r in extra))
         self.progress = {"done": 0, "total": len(coins), "active": True}
         self.note("-", None, "bilgi", f"Analiz başladı: {len(coins)} coin incelenecek")
         try:
@@ -293,59 +353,97 @@ class Engine:
                 await self.log("WARNING", f"{a.symbol}: güncel alış fiyatı alınamadı, işlem yapılmadı ({e})")
                 self.note(a.symbol, a.score, "red", "Güncel fiyat alınamadı, işlem yapılmadı")
                 return
+            risk = self.settings.risk
+            if self.max_order_usdt > 0:   # config'teki sınır panelden gevşetilemez
+                cap = min(risk.max_order_usdt or self.max_order_usdt, self.max_order_usdt)
+                risk = replace(risk, max_order_usdt=cap)
             async with self.db.session() as s:
                 acc, _, state = await self.portfolio(s)
-                d = evaluate_buy(a, state, self.symbol_info.get(a.symbol), book.ask, self.settings.risk)
+                info = self.symbol_info.get(a.symbol)
+                d = evaluate_buy(a, state, info, book.ask, risk)
                 if not d.approved:
                     await s.commit()
                     await self.log("INFO", f"{a.symbol} (puan {a.score}) alınmadı: {'; '.join(d.reasons)}")
                     self.note(a.symbol, a.score, "red", "Risk kontrolü onaylamadı: " + "; ".join(d.reasons))
                     return
                 try:
-                    fill = self.executor.market_buy(book.ask, d.quantity)
-                    if fill.notional + fill.fee > acc.cash:
+                    if self.mode != "paper" and self.trader is not None:
+                        free = await self.trader.free_balance("USDT")
+                        if free < d.notional * 1.01:
+                            raise ExchangeError(f"Borsadaki serbest USDT yetersiz ({free:.2f})")
+                    fill = await self.executor.buy(a.symbol, book.ask, d.quantity, info)
+                    if fill.notional + fill.fee_cash > acc.cash + 1e-9:
                         raise RuntimeError("Nakit yetersiz (doğrulama)")
+                except OrderUncertain as e:
+                    await self._halt(f"Emir sonucu belirsiz: {e}")
+                    return
+                except ExchangeError as e:
+                    await self.log("WARNING", f"{a.symbol} alım emri reddedildi/başarısız: {e}")
+                    self.note(a.symbol, a.score, "red", f"Emir gönderilemedi: {e}")
+                    return
                 except Exception as e:  # noqa: BLE001
                     self.halted_reason = f"Emir hatası: {e}"
                     await self.log("ERROR", f"{a.symbol} alım emrinde hata, yeni emirler durduruldu: {e}")
                     return
-                acc.cash -= fill.notional + fill.fee
+                await self.log("INFO", f"[{self.label}] ALIM GERÇEKLEŞTİ {a.symbol}: {fill.quantity:g} @ {fill.price:.6g}, tutar {fill.notional:.4f}, komisyon {fill.fee:.4f}")
+                ratio_tp, ratio_sl = a.take_profit / a.price, a.stop_loss / a.price   # hedef/stop gerçek dolum fiyatına göre
+                tp, sl = fill.price * ratio_tp, fill.price * ratio_sl
+                acc.cash -= fill.notional + fill.fee_cash
                 why = " | ".join(a.reasons[:6])
-                pos = Position(symbol=a.symbol, mode="paper", quantity=fill.quantity, initial_quantity=fill.quantity,
-                               entry_price=fill.price, cost_basis=fill.notional + fill.fee, take_profit=a.take_profit,
-                               stop_loss=a.stop_loss, initial_stop=a.stop_loss, highest_price=fill.price, score=a.score,
+                pos = Position(symbol=a.symbol, mode=self.mode, quantity=fill.quantity, initial_quantity=fill.quantity,
+                               entry_price=fill.price, cost_basis=fill.notional + fill.fee, take_profit=tp,
+                               stop_loss=sl, initial_stop=sl, highest_price=fill.price, score=a.score,
                                reason=why, expected_fee=d.expected_fee, fees_paid=fill.fee)
                 s.add(pos)
                 await s.flush()
-                s.add(Trade(position_id=pos.id, symbol=a.symbol, side="BUY", mode="paper", price=fill.price,
+                s.add(Trade(position_id=pos.id, symbol=a.symbol, side="BUY", mode=self.mode, price=fill.price,
                             quantity=fill.quantity, notional=fill.notional, fee=fill.fee, note=f"Puan {a.score}"))
                 await s.commit()
             await self._update_stream()
-            self.note(a.symbol, a.score, "alım", f"SANAL ALIM: {fill.quantity:g} adet @ {fill.price:.6g} ({fill.notional:.2f} USDT). Hedef {a.take_profit:.6g}, stop {a.stop_loss:.6g}. Gerekçe: {why}")
-            await self.log("INFO", f"SANAL ALIM {a.symbol}: {fill.quantity:g} adet @ {fill.price:.6g} "
-                                   f"({fill.notional:.2f} USDT), hedef {a.take_profit:.6g}, stop {a.stop_loss:.6g}")
+            self.note(a.symbol, a.score, "alım", f"{self.label} ALIM: {fill.quantity:g} adet @ {fill.price:.6g} ({fill.notional:.2f} USDT). Hedef {tp:.6g}, stop {sl:.6g}. Gerekçe: {why}")
+
+    async def _halt(self, reason: str) -> None:
+        self.halted_reason = reason
+        self.running = False
+        await self._save_state()
+        await self.log("ERROR", f"BOT DURDURULDU: {reason}. Borsa hesabınızı elle kontrol edin.")
+        self.note("-", None, "red", f"BOT DURDURULDU: {reason}")
 
     async def _sell(self, s, acc: Account, pos: Position, qty: float, bid: float, reason: str) -> float:
         info = self.symbol_info.get(pos.symbol)
         qty = min(pos.quantity, round_step(qty, info.step_size) if info else qty)
         if pos.quantity - qty < 1e-12 or (info and (pos.quantity - qty) * bid < max(info.min_notional, 5.0)):
             qty = pos.quantity  # kalan çok küçükse tamamını sat
-        fill = self.executor.market_sell(bid, qty)
+        fill = await self.executor.sell(pos.symbol, bid, qty, info)
+        qty = min(qty, fill.quantity) if fill.quantity > 0 else qty
         portion = qty / pos.quantity
         cost_part = pos.cost_basis * portion
         pnl = fill.notional - fill.fee - cost_part
-        acc.cash += fill.notional - fill.fee
+        acc.cash += fill.notional - fill.fee_cash
         pos.quantity -= qty
         pos.cost_basis -= cost_part
         pos.realized_pnl += pnl
         pos.fees_paid += fill.fee
         if pos.quantity <= 1e-12:
             pos.quantity, pos.status, pos.closed_at, pos.exit_reason = 0.0, "closed", utcnow(), reason
-        s.add(Trade(position_id=pos.id, symbol=pos.symbol, side="SELL", mode="paper", price=fill.price, quantity=qty,
+        s.add(Trade(position_id=pos.id, symbol=pos.symbol, side="SELL", mode=self.mode, price=fill.price, quantity=qty,
                     notional=fill.notional, fee=fill.fee, pnl=pnl, note=reason))
-        self.note(pos.symbol, None, "satış", f"SANAL SATIŞ: {qty:g} adet @ {fill.price:.6g} ({reason}), net {pnl:+.2f} USDT")
-        await self.log("INFO", f"SANAL SATIŞ {pos.symbol}: {qty:g} @ {fill.price:.6g} ({reason}), net {pnl:+.2f} USDT")
+        self.note(pos.symbol, None, "satış", f"{self.label} SATIŞ: {qty:g} adet @ {fill.price:.6g} ({reason}), net {pnl:+.2f} USDT")
+        await self.log("INFO", f"[{self.label}] SATIŞ {pos.symbol}: {qty:g} @ {fill.price:.6g} ({reason}), net {pnl:+.2f} USDT")
         return pnl
+
+    async def _try_sell(self, s, acc, pos, qty, bid, reason) -> bool:
+        """Satışı dener. Borsa reddederse bir sonraki döngüde yeniden dener; sonuç belirsizse durdurur."""
+        try:
+            await self._sell(s, acc, pos, qty, bid, reason)
+            return True
+        except OrderUncertain as e:
+            self.frozen.add(pos.symbol)
+            await self._halt(f"{pos.symbol} satış sonucu belirsiz: {e}")
+        except ExchangeError as e:
+            await self.log("ERROR", f"{pos.symbol} SATIŞ BAŞARISIZ ({reason}): {e}. Yeniden denenecek.")
+            self.note(pos.symbol, None, "red", f"Satış başarısız ({reason}): {e}")
+        return False
 
     async def manage_positions(self) -> None:
         async with self._lock:
@@ -354,6 +452,8 @@ class Engine:
                 t = self.settings.trade
                 fee = self.settings.risk.fee_pct / 100
                 for pos in positions:
+                    if pos.symbol in self.frozen:
+                        continue   # sonucu belirsiz emir var: elle kontrol edilene kadar dokunma
                     price = await self.current_price(pos.symbol)
                     if price is None:
                         continue
@@ -371,18 +471,18 @@ class Engine:
                         continue
                     if hit_stop:
                         reason = "İz süren stop" if pos.stop_loss > pos.initial_stop else "Stop-loss"
-                        await self._sell(s, acc, pos, pos.quantity, book.bid, reason)
+                        await self._try_sell(s, acc, pos, pos.quantity, book.bid, reason)
                         continue
                     if self.executor.net_if_sold(book.bid, pos.quantity, pos.cost_basis) <= 0:
                         continue  # net kâr pozitif değilse hedefte satma
                     if t.scale_out_enabled and not pos.scaled_out:
-                        await self._sell(s, acc, pos, pos.quantity * t.scale_out_fraction, book.bid, "Kâr hedefi (kademeli)")
-                        if pos.status == "open":
+                        ok = await self._try_sell(s, acc, pos, pos.quantity * t.scale_out_fraction, book.bid, "Kâr hedefi (kademeli)")
+                        if ok and pos.status == "open":
                             pos.scaled_out = True
                             pos.stop_loss = max(pos.stop_loss, pos.entry_price * (1 + 2 * fee))  # başa baş
                             pos.take_profit = pos.take_profit + (pos.take_profit - pos.entry_price)
                     else:
-                        await self._sell(s, acc, pos, pos.quantity, book.bid, "Kâr hedefi")
+                        await self._try_sell(s, acc, pos, pos.quantity, book.bid, "Kâr hedefi")
                 await s.commit()
 
     async def close_position(self, position_id: int, reason: str = "Elle kapatıldı") -> bool:
@@ -393,7 +493,7 @@ class Engine:
                 if pos is None or pos.status != "open":
                     return False
                 book = await self.client.book_ticker(pos.symbol)
-                await self._sell(s, acc, pos, pos.quantity, book.bid, reason)
+                await self._try_sell(s, acc, pos, pos.quantity, book.bid, reason)
                 await s.commit()
                 return True
 
@@ -409,9 +509,62 @@ class Engine:
         return n
 
     # ---------- kontrol ----------
-    async def set_running(self, on: bool) -> None:
+    async def verify_exchange(self) -> dict:
+        """Testnet/canlı mod için borsa bağlantısını ve API anahtarı yetkilerini doğrular."""
+        checks: list[dict] = []
+        warnings: list[str] = []
+
+        def add(text: str, ok: bool) -> None:
+            checks.append({"text": text, "ok": ok})
+
+        if self.mode == "paper":
+            return {"ok": True, "mode": self.mode, "checks": [], "warnings": []}
+        if self.trader is None:
+            self.exchange_check = {"ok": False, "mode": self.mode, "warnings": [], "at": time.time(),
+                                   "checks": [{"text": "API anahtarı kayıtlı değil (Bağlantılar sekmesinden girin)", "ok": False}]}
+            return self.exchange_check
+        try:
+            acc = await self.trader.account()
+            add("Borsa hesabına bağlanıldı", True)
+            add("Hesapta alım-satım izni var", bool(acc.get("canTrade")))
+            free = 0.0
+            for b in acc.get("balances", []):
+                if b["asset"] == "USDT":
+                    free = float(b["free"])
+            need = self.budget if self.mode == "live" else 0.0
+            add(f"Serbest USDT ({free:.2f}) bot bütçesinden ({need:.2f}) az değil", free >= need)
+            if self.mode == "live":
+                r = await self.trader.api_restrictions()
+                add("API anahtarında PARA ÇEKME izni KAPALI", r.get("enableWithdrawals") is False)
+                add("API anahtarında Spot alım-satım izni açık", bool(r.get("enableSpotAndMarginTrading")))
+                add("API anahtarında vadeli/kaldıraç izni kapalı", not r.get("enableFutures", False) and not r.get("enableMargin", False))
+                if not r.get("ipRestrict"):
+                    warnings.append("API anahtarına IP kısıtlaması konmamış. Binance'te anahtarı sadece bu bilgisayarın IP adresine kısıtlamanız önerilir.")
+            # kayıtlı açık pozisyonlar borsadaki bakiyeyle uyumlu mu?
+            async with self.db.session() as s:
+                opens = (await s.execute(select(Position).where(Position.status == "open"))).scalars().all()
+            bal = {b["asset"]: float(b["free"]) + float(b["locked"]) for b in acc.get("balances", [])}
+            for p in opens:
+                base = (self.symbol_info.get(p.symbol).base if p.symbol in self.symbol_info else p.symbol.removesuffix("USDT"))
+                add(f"{p.symbol} pozisyonu borsadaki bakiyeyle uyumlu", bal.get(base, 0.0) >= p.quantity * 0.98)
+        except ExchangeError as e:
+            add(f"Borsa doğrulaması başarısız: {e}", False)
+        ok = all(c["ok"] for c in checks)
+        self.exchange_check = {"ok": ok, "mode": self.mode, "checks": checks, "warnings": warnings, "at": time.time()}
+        return self.exchange_check
+
+    async def set_running(self, on: bool, confirmed: bool = False) -> None:
         if on and self.emergency_stop:
             raise ValueError("Acil durdurma aktif. Önce acil durdurmayı kaldırın.")
+        if on and self.mode == "live" and not confirmed:
+            raise ValueError("Gerçek para modunda başlatmak için onay metnini yazmalısınız.")
+        if on and self.mode != "paper":
+            chk = await self.verify_exchange()
+            if not chk["ok"]:
+                bad = "; ".join(c["text"] for c in chk["checks"] if not c["ok"])
+                raise ValueError(f"Güvenlik kontrolü başarısız, bot başlatılmadı: {bad}")
+            if self.frozen:
+                raise ValueError("Sonucu belirsiz kalan emir var. Borsa hesabınızı kontrol edip botu yeniden başlatın.")
         self.running = on
         if on:
             self.halted_reason = None
@@ -447,7 +600,8 @@ class Engine:
             closed_count = (await s.execute(select(func.count()).select_from(Position).where(Position.status == "closed"))).scalar()
         top = sorted(self.latest.values(), key=lambda a: a.score, reverse=True)[:5]
         return {
-            "mode": "paper",
+            "mode": self.mode,
+            "mode_label": self.label,
             "running": self.running,
             "emergency_stop": self.emergency_stop,
             "halted_reason": self.halted_reason,

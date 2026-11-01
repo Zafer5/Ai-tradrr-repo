@@ -23,6 +23,7 @@ class RiskSettings:
     min_score: int = 70                   # alım için gereken en düşük analiz puanı
     fee_pct: float = 0.1                  # işlem başına komisyon (%)
     slippage_pct: float = 0.05            # tahmini fiyat kayması (%)
+    max_order_usdt: float = 0.0            # tek alımın USDT üst sınırı (0 = yok; canlı modda zorunlu uygulanır)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -105,6 +106,8 @@ def evaluate_buy(a: Analysis, state: PortfolioState, info: SymbolInfo | None, as
         "toplam maruziyet limiti": state.equity * s.max_total_exposure_pct / 100 - state.open_exposure,
         "nakit bakiye": state.cash / (1 + fee),
     }
+    if s.max_order_usdt > 0:
+        caps["emir üst sınırı"] = s.max_order_usdt
     notional = qty * fill
     limit_name = None
     for name, cap in caps.items():
