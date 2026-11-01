@@ -13,11 +13,17 @@ powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $t=Join-Path $env
   robocopy "%TEMP%\akt-update\Ai-tradrr-repo-main\backend" "%~dp0backend" /E /NFL /NDL /NJH /NJS >nul
   echo Guncel surum uygulandi.
 ) || echo Guncelleme yapilamadi, mevcut surumle devam ediliyor.
+if exist .venv\Scripts\python.exe (
+  .venv\Scripts\python.exe -c "import sys" >nul 2>&1 || (
+    echo Python ortami bozuk veya baska klasorden tasinmis, yeniden olusturuluyor...
+    rmdir /s /q .venv
+  )
+)
 if not exist .venv (
   echo Ilk kurulum yapiliyor, birkac dakika surebilir...
   python -m venv .venv || (echo Python bulunamadi. python.org adresinden kurun ve "Add to PATH" kutusunu isaretleyin. & pause & exit /b 1)
 )
-.venv\Scripts\pip install -q -r backend\requirements.txt || (echo Kurulum hatasi & pause & exit /b 1)
+.venv\Scripts\python.exe -m pip install -q -r backend\requirements.txt || (echo Kurulum hatasi & pause & exit /b 1)
 echo.
 echo Panel: http://localhost:8000   (kapatmak icin bu pencereyi kapatin)
 start "" http://localhost:8000
